@@ -9,10 +9,12 @@
 #include "ledger/LedgerTxnEntry.h"
 #include "ledger/LedgerTxnHeader.h"
 #include "main/Application.h"
+#include "transactions/SponsorshipUtils.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Logging.h"
 #include "util/XDROperators.h"
 #include "util/types.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -29,6 +31,7 @@ ManageDataOpFrame::ManageDataOpFrame(Operation const& op, OperationResult& res,
 bool
 ManageDataOpFrame::doApply(AbstractLedgerTxn& ltx)
 {
+    ZoneNamedN(applyZone, "ManageDataOp apply", true);
     auto header = ltx.loadHeader();
     if (header.current().ledgerVersion == 3)
     {
@@ -41,28 +44,35 @@ ManageDataOpFrame::doApply(AbstractLedgerTxn& ltx)
     {
         if (!data)
         { // create a new data entry
-            auto sourceAccount = loadSourceAccount(ltx, header);
-            switch (addNumEntries(header, sourceAccount, 1))
-            {
-            case AddSubentryResult::SUCCESS:
-                break;
-            case AddSubentryResult::LOW_RESERVE:
-                innerResult().code(MANAGE_DATA_LOW_RESERVE);
-                return false;
-            case AddSubentryResult::TOO_MANY_SUBENTRIES:
-                mResult.code(opTOO_MANY_SUBENTRIES);
-                return false;
-            default:
-                throw std::runtime_error(
-                    "Unexpected result from addNumEntries");
-            }
-
             LedgerEntry newData;
             newData.data.type(DATA);
             auto& dataEntry = newData.data.data();
             dataEntry.accountID = getSourceID();
             dataEntry.dataName = mManageData.dataName;
             dataEntry.dataValue = *mManageData.dataValue;
+
+            auto sourceAccount = loadSourceAccount(ltx, header);
+            switch (createEntryWithPossibleSponsorship(ltx, header, newData,
+                                                       sourceAccount))
+            {
+            case SponsorshipResult::SUCCESS:
+                break;
+            case SponsorshipResult::LOW_RESERVE:
+                innerResult().code(MANAGE_DATA_LOW_RESERVE);
+                return false;
+            case SponsorshipResult::TOO_MANY_SUBENTRIES:
+                mResult.code(opTOO_MANY_SUBENTRIES);
+                return false;
+            case SponsorshipResult::TOO_MANY_SPONSORING:
+                mResult.code(opTOO_MANY_SPONSORING);
+                return false;
+            case SponsorshipResult::TOO_MANY_SPONSORED:
+                // This is impossible right now because there is a limit on sub
+                // entries, fall through and throw
+            default:
+                throw std::runtime_error("Unexpected result from "
+                                         "createEntryWithPossibleSponsorship");
+            }
             ltx.create(newData);
         }
         else
@@ -77,13 +87,14 @@ ManageDataOpFrame::doApply(AbstractLedgerTxn& ltx)
             innerResult().code(MANAGE_DATA_NAME_NOT_FOUND);
             return false;
         }
-        data.erase();
+
         auto sourceAccount = loadSourceAccount(ltx, header);
-        addNumEntries(header, sourceAccount, -1);
+        removeEntryWithPossibleSponsorship(ltx, header, data.current(),
+                                           sourceAccount);
+        data.erase();
     }
 
     innerResult().code(MANAGE_DATA_SUCCESS);
-
     return true;
 }
 
@@ -108,7 +119,7 @@ ManageDataOpFrame::doCheckValid(uint32_t ledgerVersion)
 
 void
 ManageDataOpFrame::insertLedgerKeysToPrefetch(
-    std::unordered_set<LedgerKey>& keys) const
+    UnorderedSet<LedgerKey>& keys) const
 {
     keys.emplace(dataKey(getSourceID(), mManageData.dataName));
 }

@@ -3,13 +3,13 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "lib/catch.hpp"
-#include "lib/util/format.h"
 #include "medida/histogram.h"
 #include "medida/stats/sliding_window_sample.h"
 #include "medida/stats/snapshot.h"
 #include "util/Logging.h"
 #include "util/Math.h"
 #include <deque>
+#include <fmt/format.h>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -53,7 +53,8 @@ printDistribution(std::vector<double> const& dist, size_t nbuckets = 10)
     size_t ncols = 40;
     size_t countPerCol = maxbucket / ncols;
     double b = bucketsz;
-    LOG(INFO) << fmt::format("histogram range [{:8.2f},{:8.2f}]", lo, hi);
+    LOG_INFO(DEFAULT_LOG, "{}",
+             fmt::format("histogram range [{:8.2f},{:8.2f}]", lo, hi));
     ;
     for (auto const& c : buckets)
     {
@@ -62,8 +63,9 @@ printDistribution(std::vector<double> const& dist, size_t nbuckets = 10)
         {
             oss << '*';
         }
-        LOG(INFO) << fmt::format("[{:8.2f},{:8.2f}] = {:>8d} : {:s}", b,
-                                 (b + bucketsz), c, oss.str());
+        LOG_INFO(DEFAULT_LOG, "{}",
+                 fmt::format("[{:8.2f},{:8.2f}] = {:>8d} : {:s}", b,
+                             (b + bucketsz), c, oss.str()));
         ;
         b += bucketsz;
     }
@@ -144,7 +146,7 @@ struct Percentiles
                 }
                 oss << dbl;
             }
-            LOG(ERROR) << "failing samples: " << oss.str();
+            LOG_ERROR(DEFAULT_LOG, "failing samples: {}", oss.str());
         }
     }
 };
@@ -210,7 +212,7 @@ class SlidingWindowTester
             mSamples.emplace_back(sample, mTimestamp);
             mTimestamp += timeStep;
         }
-        LOG(DEBUG) << "added samples, have " << mSamples.size();
+        LOG_DEBUG(DEFAULT_LOG, "added samples, have {}", mSamples.size());
 
         // Drop values from the front that are out-of-range.
         auto dropBefore = mTimestamp - sampleCutoff;
@@ -218,7 +220,7 @@ class SlidingWindowTester
         {
             mSamples.pop_front();
         }
-        LOG(DEBUG) << "dropped samples, now have " << mSamples.size();
+        LOG_DEBUG(DEFAULT_LOG, "dropped samples, now have {}", mSamples.size());
     }
 
     // Adds 10 minutes @ 1khz of uniform samples from [low, high]
@@ -501,4 +503,25 @@ TEST_CASE("sliding window percentiles - alternating frequencies and patterns",
 
     swt.addUniformSamplesAtHighFrequency(1, 100);
     swt.checkPercentiles(false);
+}
+
+TEST_CASE("sums of nanoseconds do not overflow", "[medida_math]")
+{
+    // This tests that sums (and possibly other derived values of accumulated
+    // nanoseconds -- billionths of a second) in medida are not stored in an
+    // int64 and therefore don't overflow after a few months of accumulation at
+    // decently-high frequency.
+    medida::Histogram hist;
+    int64_t billion = 1000000000;
+    int64_t billion_billion = billion * billion;
+    // the biggest int64_t is 9.2 billion billion.
+    for (size_t i = 0; i < 15; ++i)
+    {
+        hist.Update(billion_billion);
+        REQUIRE(hist.sum() >= 0);
+        REQUIRE(hist.min() >= 0);
+        REQUIRE(hist.max() >= 0);
+        REQUIRE(hist.mean() >= 0);
+        REQUIRE(hist.std_dev() >= 0);
+    }
 }

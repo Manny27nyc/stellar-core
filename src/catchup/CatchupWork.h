@@ -68,6 +68,12 @@ class CatchupWork : public Work
     virtual ~CatchupWork();
     std::string getStatus() const override;
 
+    CatchupConfiguration const&
+    getCatchupConfiguration() const
+    {
+        return mCatchupConfiguration;
+    }
+
   private:
     LedgerNumHashPair mLastClosedLedgerHashPair;
     CatchupConfiguration const mCatchupConfiguration;
@@ -81,6 +87,8 @@ class CatchupWork : public Work
     std::shared_ptr<GetHistoryArchiveStateWork> mGetBucketStateWork;
 
     WorkSeqPtr mDownloadVerifyLedgersSeq;
+    std::promise<LedgerNumHashPair> mRangeEndPromise;
+    std::shared_future<LedgerNumHashPair> mRangeEndFuture;
     std::shared_ptr<VerifyLedgerChainWork> mVerifyLedgers;
     std::shared_ptr<Work> mVerifyTxResults;
     WorkSeqPtr mBucketVerifyApplySeq;

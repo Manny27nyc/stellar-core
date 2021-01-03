@@ -11,6 +11,7 @@ AC_INIT([stellar-core],[0.1],[],[],[http://www.stellar.org])
 AM_INIT_AUTOMAKE([-Wall -Wextra -Wconversion subdir-objects tar-ustar silent-rules])
 AC_CONFIG_SRCDIR([configure.ac])
 AC_CONFIG_MACRO_DIR([m4])
+AC_CANONICAL_HOST
 
 AC_ARG_VAR([LIBCXX_PATH], [path to libc++ and libc++abi])
 
@@ -49,6 +50,9 @@ AX_CXX_COMPILE_STDCXX_14(noext,mandatory)
 AX_FRESH_COMPILER
 # -pthread seems to be required by -std=c++14 on some hosts
 AX_APPEND_COMPILE_FLAGS([-pthread])
+
+# additional defines
+AX_APPEND_COMPILE_FLAGS([-DFMT_HEADER_ONLY=1])
 
 AC_MSG_CHECKING([whether defect report N4387 is resolved])
 AC_COMPILE_IFELSE([AC_LANG_SOURCE([[#include <tuple>
@@ -154,7 +158,7 @@ AC_ARG_ENABLE([extrachecks],
         [build with additional debugging checks enabled]))
 AS_IF([test "x$enable_extrachecks" = "xyes"], [
   # don't try to detect which c++ library we're using
-  CXXFLAGS="$CXXFLAGS -D_GLIBCXX_DEBUG=1 -D_LIBCPP_DEBUG=1"
+  CXXFLAGS="$CXXFLAGS -D_GLIBCXX_DEBUG=1 -D_GLIBCXX_SANITIZE_VECTOR=1 -D_LIBCPP_DEBUG=0"
 ])
 
 AC_ARG_ENABLE([ccache],
@@ -228,7 +232,7 @@ sqlite3_LIBS=
 AC_SUBST(sqlite3_CFLAGS)
 AC_SUBST(sqlite3_LIBS)
 
-PKG_CHECK_MODULES(libsodium, [libsodium >= 1.0.13], :, libsodium_INTERNAL=yes)
+PKG_CHECK_MODULES(libsodium, [libsodium >= 1.0.17], :, libsodium_INTERNAL=yes)
 
 AX_PKGCONFIG_SUBDIR(lib/libsodium)
 if test -n "$libsodium_INTERNAL"; then
@@ -289,6 +293,81 @@ AC_ARG_ENABLE(tests,
     AS_HELP_STRING([--disable-tests],
         [Disable building test suite]))
 AM_CONDITIONAL(BUILD_TESTS, [test x$enable_tests != xno])
+
+AC_ARG_ENABLE(tracy,
+    AS_HELP_STRING([--enable-tracy],
+        [Enable 'tracy' profiler/tracer client stub]))
+AM_CONDITIONAL(USE_TRACY, [test x$enable_tracy = xyes])
+tracy_CFLAGS='-DTRACY_ENABLE -DTRACY_ON_DEMAND -DTRACY_NO_BROADCAST -DTRACY_ONLY_LOCALHOST -DTRACY_ONLY_IPV4'
+if test x"$enable_tracy" = xyes; then
+    case "${host_os}" in
+        *darwin*)
+            ;;
+        *)
+            LDFLAGS+=" -ldl "
+            ;;
+    esac
+fi
+AC_SUBST(tracy_CFLAGS)
+
+AC_ARG_ENABLE(tracy-gui,
+    AS_HELP_STRING([--enable-tracy-gui],
+        [Enable 'tracy' profiler/tracer server GUI]))
+AM_CONDITIONAL(USE_TRACY_GUI, [test x$enable_tracy_gui = xyes])
+if test x"$enable_tracy_gui" = xyes; then
+    PKG_CHECK_MODULES(capstone, capstone)
+    PKG_CHECK_MODULES(freetype, freetype2)
+    PKG_CHECK_MODULES(glfw, glfw3)
+    case "${host_os}" in
+        *darwin*)
+            ;;
+        *)
+            PKG_CHECK_MODULES(gtk, gtk+-2.0)
+            ;;
+    esac
+fi
+
+AC_ARG_ENABLE(tracy-capture,
+    AS_HELP_STRING([--enable-tracy-capture],
+        [Enable 'tracy' profiler/tracer capture program]))
+AM_CONDITIONAL(USE_TRACY_CAPTURE, [test x$enable_tracy_capture = xyes])
+
+AC_ARG_ENABLE(spdlog,
+    AS_HELP_STRING([--disable-spdlog],
+        [Disable spdlog]))
+AM_CONDITIONAL(USE_SPDLOG, [test x$enable_spdlog != xno])
+
+case "${host_os}" in
+    *darwin*)
+        # libunwind comes standard with the command-line tools on macos
+        AC_DEFINE([HAVE_LIBUNWIND], [1],
+            [Define to 1 if you have the <libunwind.h> header file])
+        ;;
+    *)
+        # Unfortunately libunwind seems to interfere with clang-compiled
+        # exception-handling, at least when linked with libgcc (which is the
+        # default of libcxx and a requirement for libstdc++). I think this is
+        # roughly caused by both libgcc and libunwind providing the C++ EH ABI
+        # symbols but, evidently, interacting with clang-compiled code slightly
+        # differently when ELF-interposed with one another, in the same binary.
+        #
+        # Haven't been able to make a reduced testcase that works. You can check
+        # that this is still a problem by running the stellar-core Catch2-based
+        # unit test suite: many of the tests do REQUIRE_THROWS_AS(...) and
+        # that crashes with libunwind+clang.  Haven't been able to figure out a
+        # workaround either.
+        case "${CXX}" in
+            *clang*)
+                AC_MSG_NOTICE([backtraces disabled due to clang interaction with libunwind])
+            ;;
+            *)
+                PKG_CHECK_MODULES(libunwind, libunwind,
+                    AC_DEFINE([HAVE_LIBUNWIND], [1],
+                              [Define to 1 if you have the <libunwind.h> header file]))
+           ;;
+        esac
+        ;;
+esac
 
 # Need this to pass through ccache for xdrpp, libsodium
 esc() {

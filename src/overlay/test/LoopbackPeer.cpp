@@ -5,8 +5,8 @@
 #include "overlay/test/LoopbackPeer.h"
 #include "crypto/Random.h"
 #include "main/Application.h"
+#include "medida/meter.h"
 #include "medida/timer.h"
-#include "overlay/LoadManager.h"
 #include "overlay/OverlayManager.h"
 #include "overlay/OverlayMetrics.h"
 #include "overlay/StellarXDR.h"
@@ -61,7 +61,6 @@ LoopbackPeer::sendMessage(xdr::msg_ptr&& msg)
         std::copy(bytes.begin(), bytes.end(), mRecvMacKey.key.begin());
     }
 
-    // CLOG(TRACE, "Overlay") << "LoopbackPeer queueing message";
     TimestampedMessage tsm;
     tsm.mMessage = std::move(msg);
     tsm.mEnqueuedTime = mApp.getClock().now();
@@ -77,16 +76,18 @@ LoopbackPeer::sendMessage(xdr::msg_ptr&& msg)
         {
             if (rand_flip() || rand_flip())
             {
-                CLOG(DEBUG, "Overlay")
-                    << "Loopback send-to-straggler pausing, "
-                    << "outbound queue at " << mOutQueue.size();
+                CLOG_DEBUG(
+                    Overlay,
+                    "Loopback send-to-straggler pausing, outbound queue at {}",
+                    mOutQueue.size());
                 break;
             }
             else
             {
-                CLOG(DEBUG, "Overlay")
-                    << "Loopback send-to-straggler sending, "
-                    << "outbound queue at " << mOutQueue.size();
+                CLOG_DEBUG(
+                    Overlay,
+                    "Loopback send-to-straggler sending, outbound queue at {}",
+                    mOutQueue.size());
             }
         }
         deliverOne();
@@ -122,13 +123,12 @@ LoopbackPeer::drop(std::string const& reason, DropDirection direction, DropMode)
                                Peer::DropMode::IGNORE_WRITE_QUEUE);
                 }
             },
-            {VirtualClock::ExecutionCategory::Type::NORMAL_EVENT,
-             "LoopbackPeer: drop"});
+            "LoopbackPeer: drop");
     }
 }
 
 static bool
-damageMessage(default_random_engine& gen, xdr::msg_ptr& msg)
+damageMessage(stellar_default_random_engine& gen, xdr::msg_ptr& msg)
 {
     size_t bitsFlipped = 0;
     char* d = msg->raw_data();
@@ -174,10 +174,8 @@ LoopbackPeer::processInQueue()
         if (!mInQueue.empty())
         {
             auto self = static_pointer_cast<LoopbackPeer>(shared_from_this());
-            mApp.postOnMainThread(
-                [self]() { self->processInQueue(); },
-                {VirtualClock::ExecutionCategory::Type::NORMAL_EVENT,
-                 "LoopbackPeer: processInQueue"});
+            mApp.postOnMainThread([self]() { self->processInQueue(); },
+                                  "LoopbackPeer: processInQueue");
         }
     }
 }
@@ -185,7 +183,6 @@ LoopbackPeer::processInQueue()
 void
 LoopbackPeer::deliverOne()
 {
-    // CLOG(TRACE, "Overlay") << "LoopbackPeer attempting to deliver message";
     if (mRemote.expired())
     {
         return;
@@ -196,12 +193,10 @@ LoopbackPeer::deliverOne()
         TimestampedMessage msg = std::move(mOutQueue.front());
         mOutQueue.pop_front();
 
-        // CLOG(TRACE, "Overlay") << "LoopbackPeer dequeued message";
-
         // Possibly duplicate the message and requeue it at the front.
         if (mDuplicateProb(gRandomEngine))
         {
-            CLOG(INFO, "Overlay") << "LoopbackPeer duplicated message";
+            CLOG_INFO(Overlay, "LoopbackPeer duplicated message");
             mOutQueue.emplace_front(duplicateMessage(msg));
             mStats.messagesDuplicated++;
         }
@@ -209,7 +204,7 @@ LoopbackPeer::deliverOne()
         // Possibly requeue it at the back and return, reordering.
         if (mReorderProb(gRandomEngine) && mOutQueue.size() > 0)
         {
-            CLOG(INFO, "Overlay") << "LoopbackPeer reordered message";
+            CLOG_INFO(Overlay, "LoopbackPeer reordered message");
             mStats.messagesReordered++;
             mOutQueue.emplace_back(std::move(msg));
             return;
@@ -218,7 +213,7 @@ LoopbackPeer::deliverOne()
         // Possibly flip some bits in the message.
         if (mDamageProb(gRandomEngine))
         {
-            CLOG(INFO, "Overlay") << "LoopbackPeer damaged message";
+            CLOG_INFO(Overlay, "LoopbackPeer damaged message");
             if (damageMessage(gRandomEngine, msg.mMessage))
                 mStats.messagesDamaged++;
         }
@@ -226,7 +221,7 @@ LoopbackPeer::deliverOne()
         // Possibly just drop the message on the floor.
         if (mDropProb(gRandomEngine))
         {
-            CLOG(INFO, "Overlay") << "LoopbackPeer dropped message";
+            CLOG_INFO(Overlay, "LoopbackPeer dropped message");
             mStats.messagesDropped++;
             return;
         }
@@ -252,17 +247,13 @@ LoopbackPeer::deliverOne()
                         remS->processInQueue();
                     }
                 },
-                {VirtualClock::ExecutionCategory::Type::NORMAL_EVENT,
-                 "LoopbackPeer: processInQueue in deliverOne"});
+                "LoopbackPeer: processInQueue in deliverOne");
         }
-        LoadManager::PeerContext loadCtx(mApp, mPeerID);
         mLastWrite = mApp.getClock().now();
         getOverlayMetrics().mMessageWrite.Mark();
         getOverlayMetrics().mByteWrite.Mark(nBytes);
         ++mPeerMetrics.mMessageWrite;
         mPeerMetrics.mByteWrite += nBytes;
-
-        // CLOG(TRACE, "Overlay") << "LoopbackPeer posted message to remote";
     }
 }
 
@@ -466,8 +457,7 @@ LoopbackPeerConnection::LoopbackPeerConnection(Application& initiator,
                 inC->connectHandler(asio::error_code());
             }
         },
-        {VirtualClock::ExecutionCategory::Type::NORMAL_EVENT,
-         "LoopbackPeer: connect"});
+        "LoopbackPeer: connect");
 }
 
 LoopbackPeerConnection::~LoopbackPeerConnection()

@@ -5,10 +5,10 @@
 #include "bucket/Bucket.h"
 #include "ledger/test/LedgerTestUtils.h"
 #include "lib/catch.hpp"
-#include "lib/util/format.h"
 #include "test/test.h"
 #include "util/Logging.h"
 #include "util/XDRStream.h"
+#include <fmt/format.h>
 
 #include <chrono>
 
@@ -29,13 +29,13 @@ TEST_CASE("XDROutputFileStream fail modes", "[xdrstream]")
     }
     SECTION("write throws")
     {
-        auto hasher = SHA256::create();
+        SHA256 hasher;
         size_t bytes = 0;
         auto ledgerEntries = LedgerTestUtils::generateValidLedgerEntries(1);
         auto bucketEntries =
             Bucket::convertToBucketEntry(false, {}, ledgerEntries, {});
 
-        REQUIRE_THROWS_AS(out.writeOne(bucketEntries[0], hasher.get(), &bytes),
+        REQUIRE_THROWS_AS(out.writeOne(bucketEntries[0], &hasher, &bytes),
                           std::runtime_error);
     }
     SECTION("close throws")
@@ -49,7 +49,7 @@ TEST_CASE("XDROutputFileStream fsync bench", "[!hide][xdrstream][bench]")
     VirtualClock clock;
     Config const& cfg = getTestConfig(0);
 
-    auto hasher = SHA256::create();
+    SHA256 hasher;
     auto ledgerEntries = LedgerTestUtils::generateValidLedgerEntries(10000000);
     auto bucketEntries =
         Bucket::convertToBucketEntry(false, {}, ledgerEntries, {});
@@ -70,26 +70,26 @@ TEST_CASE("XDROutputFileStream fsync bench", "[!hide][xdrstream][bench]")
         auto start = std::chrono::system_clock::now();
         for (auto const& e : bucketEntries)
         {
-            outFsync.writeOne(e, hasher.get(), &bytes);
+            outFsync.writeOne(e, &hasher, &bytes);
         }
         outFsync.close();
         auto stop = std::chrono::system_clock::now();
         auto elapsed =
             std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
-        CLOG(INFO, "Fs") << "wrote " << bytes << " bytes to fsync file in "
-                         << elapsed.count() << "ms";
+        CLOG_INFO(Fs, "wrote {} bytes to fsync file in {}ms", bytes,
+                  elapsed.count());
 
         bytes = 0;
         start = std::chrono::system_clock::now();
         for (auto const& e : bucketEntries)
         {
-            outNoFsync.writeOne(e, hasher.get(), &bytes);
+            outNoFsync.writeOne(e, &hasher, &bytes);
         }
         outNoFsync.close();
         stop = std::chrono::system_clock::now();
         elapsed =
             std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
-        CLOG(INFO, "Fs") << "wrote " << bytes << " bytes to no-fsync file in "
-                         << elapsed.count() << "ms";
+        CLOG_INFO(Fs, "wrote {} bytes to no-fsync file in {}ms", bytes,
+                  elapsed.count());
     }
 }

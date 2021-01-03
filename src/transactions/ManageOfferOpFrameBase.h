@@ -27,7 +27,10 @@ class ManageOfferOpFrameBase : public OperationFrame
                                         int64_t& maxSheepSend,
                                         int64_t& maxWheatReceive);
 
-    LedgerEntry buildOffer(int64_t amount, uint32_t flags) const;
+    LedgerEntry buildOffer(int64_t amount, uint32_t flags,
+                           LedgerEntry::_ext_t const& extension) const;
+
+    virtual int64_t generateNewOfferID(LedgerTxnHeader& header);
 
   public:
     ManageOfferOpFrameBase(Operation const& op, OperationResult& res,
@@ -38,8 +41,8 @@ class ManageOfferOpFrameBase : public OperationFrame
     bool doCheckValid(uint32_t ledgerVersion) override;
 
     bool doApply(AbstractLedgerTxn& lsOuter) override;
-    void insertLedgerKeysToPrefetch(
-        std::unordered_set<LedgerKey>& keys) const override;
+    void
+    insertLedgerKeysToPrefetch(UnorderedSet<LedgerKey>& keys) const override;
 
     virtual bool isAmountValid() const = 0;
     virtual bool isDeleteOffer() const = 0;

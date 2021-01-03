@@ -7,9 +7,10 @@
 #include "ledger/LedgerHashUtils.h"
 #include "overlay/StellarXDR.h"
 #include "transactions/TransactionFrame.h"
+#include "util/UnorderedMap.h"
+#include "util/optional.h"
 #include <deque>
 #include <functional>
-#include <unordered_map>
 
 namespace stellar
 {
@@ -17,6 +18,7 @@ class Application;
 
 class TxSetFrame;
 typedef std::shared_ptr<TxSetFrame> TxSetFramePtr;
+typedef std::shared_ptr<TxSetFrame const> TxSetFrameConstPtr;
 
 class AbstractTxSetFrameForApply
 {
@@ -39,8 +41,11 @@ class AbstractTxSetFrameForApply
 
 class TxSetFrame : public AbstractTxSetFrameForApply
 {
-    bool mHashIsValid;
-    Hash mHash;
+    optional<Hash> mHash{nullptr};
+
+    // mValid caches both the last app LCL that we checked
+    // vaidity for, and the result of that validity check.
+    optional<std::pair<Hash, bool>> mValid{nullptr};
 
     Hash mPreviousLedgerHash;
 
@@ -48,10 +53,10 @@ class TxSetFrame : public AbstractTxSetFrameForApply
 
     bool checkOrTrim(Application& app,
                      std::vector<TransactionFrameBasePtr>& trimmed,
-                     bool justCheck);
+                     bool justCheck, uint64_t lowerBoundCloseTimeOffset,
+                     uint64_t upperBoundCloseTimeOffset);
 
-    std::unordered_map<AccountID, AccountTransactionQueue>
-    buildAccountTxQueues();
+    UnorderedMap<AccountID, AccountTransactionQueue> buildAccountTxQueues();
     friend struct SurgeCompare;
 
   public:
@@ -76,11 +81,14 @@ class TxSetFrame : public AbstractTxSetFrameForApply
 
     std::vector<TransactionFrameBasePtr> sortForApply() override;
 
-    bool checkValid(Application& app);
+    bool checkValid(Application& app, uint64_t lowerBoundCloseTimeOffset,
+                    uint64_t upperBoundCloseTimeOffset);
 
     // remove invalid transaction from this set and return those removed
     // transactions
-    std::vector<TransactionFrameBasePtr> trimInvalid(Application& app);
+    std::vector<TransactionFrameBasePtr>
+    trimInvalid(Application& app, uint64_t lowerBoundCloseTimeOffset,
+                uint64_t upperBoundCloseTimeOffset);
     void surgePricingFilter(Application& app);
 
     void removeTx(TransactionFrameBasePtr tx);
@@ -89,7 +97,8 @@ class TxSetFrame : public AbstractTxSetFrameForApply
     add(TransactionFrameBasePtr tx)
     {
         mTransactions.push_back(tx);
-        mHashIsValid = false;
+        mHash.reset();
+        mValid.reset();
     }
 
     size_t size(LedgerHeader const& lh) const;

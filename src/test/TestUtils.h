@@ -26,6 +26,8 @@ void injectSendPeersAndReschedule(VirtualClock::time_point& end,
 
 void shutdownWorkScheduler(Application& app);
 
+std::vector<Asset> getInvalidAssets(SecretKey const& issuer);
+
 class BucketListDepthModifier
 {
     uint32_t const mPrevDepth;
@@ -65,15 +67,17 @@ class TestApplication : public ApplicationImpl
     std::unique_ptr<InvariantManager> createInvariantManager() override;
 };
 
-template <typename T = TestApplication,
+template <typename T = TestApplication, typename... Args,
           typename = typename std::enable_if<
               std::is_base_of<TestApplication, T>::value>::type>
 std::shared_ptr<T>
-createTestApplication(VirtualClock& clock, Config const& cfg, bool newDB = true)
+createTestApplication(VirtualClock& clock, Config const& cfg, Args&&... args,
+                      bool newDB = true)
 {
     Config c2(cfg);
     c2.adjust();
-    auto app = Application::create<T>(clock, c2, newDB);
+    auto app = Application::create<T, Args...>(
+        clock, c2, std::forward<Args>(args)..., newDB);
     return app;
 }
 
@@ -81,5 +85,5 @@ time_t getTestDate(int day, int month, int year);
 std::tm getTestDateTime(int day, int month, int year, int hour, int minute,
                         int second);
 
-VirtualClock::time_point genesis(int minute, int second);
+VirtualClock::system_time_point genesis(int minute, int second);
 }

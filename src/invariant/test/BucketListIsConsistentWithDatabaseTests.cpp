@@ -18,10 +18,10 @@
 #include "transactions/TransactionUtils.h"
 #include "util/Decoder.h"
 #include "util/Math.h"
+#include "util/UnorderedSet.h"
 #include "util/XDROperators.h"
 #include "work/WorkScheduler.h"
 #include <random>
-#include <unordered_set>
 #include <vector>
 
 using namespace stellar;
@@ -36,7 +36,7 @@ struct BucketListGenerator
     Application::pointer mAppGenerate;
     Application::pointer mAppApply;
     uint32_t mLedgerSeq;
-    std::unordered_set<LedgerKey> mLiveKeys;
+    UnorderedSet<LedgerKey> mLiveKeys;
 
   public:
     BucketListGenerator()
@@ -133,7 +133,7 @@ struct BucketListGenerator
     virtual std::vector<LedgerKey>
     generateDeadEntries(AbstractLedgerTxn& ltx)
     {
-        std::unordered_set<LedgerKey> live(mLiveKeys);
+        UnorderedSet<LedgerKey> live(mLiveKeys);
         std::vector<LedgerKey> dead;
         while (dead.size() < 2 && !live.empty())
         {
@@ -182,7 +182,9 @@ struct BucketListGenerator
                 auto b = out.getBucket(bmApply);
             }
         }
-        return HistoryArchiveState(mLedgerSeq, blGenerate);
+        return HistoryArchiveState(
+            mLedgerSeq, blGenerate,
+            mAppGenerate->getConfig().NETWORK_PASSPHRASE);
     }
 };
 
@@ -232,7 +234,7 @@ struct SelectBucketListGenerator : public BucketListGenerator
     {
         if (mLedgerSeq == mSelectLedger)
         {
-            std::unordered_set<LedgerKey> filteredKeys(mLiveKeys.size());
+            UnorderedSet<LedgerKey> filteredKeys(mLiveKeys.size());
             std::copy_if(
                 mLiveKeys.begin(), mLiveKeys.end(),
                 std::inserter(filteredKeys, filteredKeys.end()),
@@ -416,6 +418,17 @@ class ApplyBucketsWorkModifyEntry : public ApplyBucketsWork
         entry.data.data().dataName = data.dataName;
     }
 
+    void
+    modifyClaimableBalanceEntry(LedgerEntry& entry)
+    {
+        ClaimableBalanceEntry const& cb = mEntry.data.claimableBalance();
+        entry.lastModifiedLedgerSeq = mEntry.lastModifiedLedgerSeq;
+        entry.data.claimableBalance() =
+            LedgerTestUtils::generateValidClaimableBalanceEntry(5);
+
+        entry.data.claimableBalance().balanceID = cb.balanceID;
+    }
+
   public:
     ApplyBucketsWorkModifyEntry(
         Application& app,
@@ -451,6 +464,9 @@ class ApplyBucketsWorkModifyEntry : public ApplyBucketsWork
                     break;
                 case DATA:
                     modifyDataEntry(entry.current());
+                    break;
+                case CLAIMABLE_BALANCE:
+                    modifyClaimableBalanceEntry(entry.current());
                     break;
                 default:
                     REQUIRE(false);

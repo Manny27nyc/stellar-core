@@ -10,10 +10,10 @@
 #include "herder/TransactionQueue.h"
 #include "herder/Upgrades.h"
 #include "util/Timer.h"
+#include "util/UnorderedMap.h"
 #include "util/XDROperators.h"
 #include <deque>
 #include <memory>
-#include <unordered_map>
 #include <vector>
 
 namespace medida
@@ -56,6 +56,7 @@ class HerderImpl : public Herder
         return mHerderSCPDriver;
     }
 
+    void processExternalized(uint64 slotIndex, StellarValue const& value);
     void valueExternalized(uint64 slotIndex, StellarValue const& value);
     void emitEnvelope(SCPEnvelope const& envelope);
 
@@ -79,13 +80,19 @@ class HerderImpl : public Herder
     void processSCPQueue();
 
     uint32_t getCurrentLedgerSeq() const override;
+    uint32 getMinLedgerSeqToAskPeers() const override;
 
     SequenceNumber getMaxSeqInPendingTxs(AccountID const&) override;
 
-    void triggerNextLedger(uint32_t ledgerSeqToTrigger) override;
+    void triggerNextLedger(uint32_t ledgerSeqToTrigger,
+                           bool checkTrackingSCP) override;
+
+    void setInSyncAndTriggerNextLedger() override;
 
     void setUpgrades(Upgrades::UpgradeParameters const& upgrades) override;
     std::string getUpgradesJson() override;
+
+    void forceSCPStateIntoSyncWithLastClosedLedger() override;
 
     bool resolveNodeID(std::string const& s, PublicKey& retKey) override;
 
@@ -121,10 +128,18 @@ class HerderImpl : public Herder
     // * it's recent enough (if `enforceRecent` is set)
     bool checkCloseTime(SCPEnvelope const& envelope, bool enforceRecent);
 
-    void ledgerClosed();
+    // Given a candidate close time, determine an offset needed to make it
+    // valid (at current system time). Returns 0 if ct is already valid
+    std::chrono::milliseconds
+    ctValidityOffset(uint64_t ct, std::chrono::milliseconds maxCtOffset =
+                                      std::chrono::milliseconds::zero());
 
-    void startRebroadcastTimer();
-    void rebroadcast();
+    void ledgerClosed(bool synchronous);
+
+    void maybeTriggerNextLedger(bool synchronous);
+
+    void startOutOfSyncTimer();
+    void outOfSyncRecovery();
     void broadcast(SCPEnvelope const& e);
 
     void processSCPQueueUpToIndex(uint64 slotIndex);
@@ -169,7 +184,7 @@ class HerderImpl : public Herder
 
     VirtualTimer mTriggerTimer;
 
-    VirtualTimer mRebroadcastTimer;
+    VirtualTimer mOutOfSyncTimer;
 
     Application& mApp;
     LedgerManager& mLedgerManager;
@@ -198,6 +213,9 @@ class HerderImpl : public Herder
     // run a background job that re-analyzes the current quorum map.
     void checkAndMaybeReanalyzeQuorumMap();
 
+    // erase all data for ledgers strictly less than ledgerSeq
+    void eraseBelow(uint32 ledgerSeq);
+
     struct QuorumMapIntersectionState
     {
         uint32_t mLastCheckLedger{0};
@@ -224,5 +242,7 @@ class HerderImpl : public Herder
         }
     };
     QuorumMapIntersectionState mLastQuorumMapIntersectionState;
+
+    uint32_t getMinLedgerSeqToRemember() const;
 };
 }

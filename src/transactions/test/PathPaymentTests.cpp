@@ -13,6 +13,7 @@
 #include "test/TxTests.h"
 #include "test/test.h"
 #include "transactions/TransactionUtils.h"
+#include "transactions/test/SponsorshipTestUtils.h"
 #include "util/Timer.h"
 
 #include <deque>
@@ -3873,109 +3874,6 @@ TEST_CASE("pathpayment", "[tx][pathpayment]")
         });
     }
 
-    SECTION("path payment uses all offers in a loop")
-    {
-        auto useAllOffersInLoop = [&](TestAccount* issuerToDelete) {
-            auto market = TestMarket{*app};
-            auto source = root.create("source", minBalance4);
-            auto destination = root.create("destination", minBalance1);
-            auto mm12 = root.create("mm12", minBalance3);
-            auto mm23 = root.create("mm23", minBalance3);
-            auto mm34 = root.create("mm34", minBalance3);
-            auto mm41 = root.create("mm41", minBalance3);
-
-            source.changeTrust(cur1, 16000);
-            mm12.changeTrust(cur1, 16000);
-            mm12.changeTrust(cur2, 16000);
-            mm23.changeTrust(cur2, 16000);
-            mm23.changeTrust(cur3, 16000);
-            mm34.changeTrust(cur3, 16000);
-            mm34.changeTrust(cur4, 16000);
-            mm41.changeTrust(cur4, 16000);
-            mm41.changeTrust(cur1, 16000);
-            destination.changeTrust(cur4, 16000);
-
-            gateway.pay(source, cur1, 8000);
-            gateway.pay(mm12, cur2, 8000);
-            gateway2.pay(mm23, cur3, 8000);
-            gateway2.pay(mm34, cur4, 8000);
-            gateway.pay(mm41, cur1, 8000);
-
-            auto o1 = market.requireChangesWithOffer({}, [&] {
-                return market.addOffer(mm12, {cur2, cur1, Price{2, 1}, 1000});
-            });
-            auto o2 = market.requireChangesWithOffer({}, [&] {
-                return market.addOffer(mm23, {cur3, cur2, Price{2, 1}, 1000});
-            });
-            auto o3 = market.requireChangesWithOffer({}, [&] {
-                return market.addOffer(mm34, {cur4, cur3, Price{2, 1}, 1000});
-            });
-            auto o4 = market.requireChangesWithOffer({}, [&] {
-                return market.addOffer(mm41, {cur1, cur4, Price{2, 1}, 1000});
-            });
-
-            for_all_versions(*app, [&] {
-                uint32_t ledgerVersion;
-                {
-                    LedgerTxn ltx(app->getLedgerTxnRoot());
-                    ledgerVersion = ltx.loadHeader().current().ledgerVersion;
-                }
-                if (issuerToDelete && ledgerVersion >= 13)
-                {
-                    closeLedgerOn(*app, 3, 1, 1, 2016);
-                    // remove issuer
-                    issuerToDelete->merge(root);
-                }
-
-                auto actual = std::vector<ClaimOfferAtom>{};
-                market.requireChanges(
-                    {{o1.key, {cur2, cur1, Price{2, 1}, 320}},
-                     {o2.key, {cur3, cur2, Price{2, 1}, 660}},
-                     {o3.key, {cur4, cur3, Price{2, 1}, 830}},
-                     {o4.key, {cur1, cur4, Price{2, 1}, 920}}},
-                    [&] {
-                        actual = source
-                                     .pay(destination, cur1, 2000, cur4, 10,
-                                          {cur1, cur2, cur3, cur4, cur1, cur2,
-                                           cur3, cur4})
-                                     .success()
-                                     .offers;
-                    });
-                auto expected = std::vector<ClaimOfferAtom>{
-                    o1.exchanged(640, 1280), o2.exchanged(320, 640),
-                    o3.exchanged(160, 320),  o4.exchanged(80, 160),
-                    o1.exchanged(40, 80),    o2.exchanged(20, 40),
-                    o3.exchanged(10, 20)};
-                REQUIRE(actual == expected);
-                // clang-format off
-                market.requireBalances(
-                    {{source, {{xlm, minBalance4 - 2 * txfee}, {cur1, 6720}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
-                    {mm12, {{xlm, minBalance3 - 3 * txfee}, {cur1, 1360}, {cur2, 7320}, {cur3, 0}, {cur4, 0}}},
-                    {mm23, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 680}, {cur3, 7660}, {cur4, 0}}},
-                    {mm34, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 340}, {cur4, 7830}}},
-                    {mm41, {{xlm, minBalance3 - 3 * txfee}, {cur1, 7920}, {cur2, 0}, {cur3, 0}, {cur4, 160}}},
-                    {destination, {{xlm, minBalance1 - txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 10}}}});
-                // clang-format on
-            });
-
-        };
-
-        SECTION("no issuers missing")
-        {
-            useAllOffersInLoop(nullptr);
-        }
-
-        SECTION("outside issuers missing")
-        {
-            useAllOffersInLoop(&gateway);
-        }
-
-        SECTION("inside issuers missing")
-        {
-            useAllOffersInLoop(&gateway2);
-        }
-    }
-
     SECTION("path payment with rounding errors")
     {
         auto market = TestMarket{*app};
@@ -4440,5 +4338,566 @@ TEST_CASE("pathpayment", "[tx][pathpayment]")
                 source.pay(destination, cur1, 50, cur2, 50, {cur1, cur2});
             });
         }
+    }
+
+    SECTION("crossed sponsored offers")
+    {
+        auto doRevokeSponsorship = [&](TestAccount& source, int64_t offerID,
+                                       TestAccount& sponsor) {
+            auto tx = transactionFrameFromOps(
+                app->getNetworkID(), source,
+                {sponsor.op(beginSponsoringFutureReserves(source)),
+                 source.op(revokeSponsorship(offerKey(source, offerID))),
+                 source.op(endSponsoringFutureReserves())},
+                {sponsor});
+
+            LedgerTxn ltx(app->getLedgerTxnRoot());
+            TransactionMeta txm(2);
+            REQUIRE(tx->checkValid(ltx, 0, 0, 0));
+            REQUIRE(tx->apply(*app, ltx, txm));
+            ltx.commit();
+        };
+
+        auto prepareAccount = [&](std::string const& seed) {
+            auto const initBalance =
+                app->getLedgerManager().getLastMinBalance(10);
+
+            auto acc = root.create(seed, initBalance);
+            acc.changeTrust(usd, INT64_MAX);
+            acc.changeTrust(idr, INT64_MAX);
+            gateway2.pay(acc, usd, 1000);
+            gateway.pay(acc, idr, 1000);
+            return acc;
+        };
+
+        TestMarket market(*app);
+
+        SECTION("offer sponsor is source or dest account")
+        {
+            auto runTest = [&](Asset const& selling, Asset const& buying,
+                               bool sourceIsSponsor) {
+                auto a1 = prepareAccount("accA1");
+                auto a2 = prepareAccount("accA2");
+                auto b = prepareAccount("accB");
+                auto c = prepareAccount("accC");
+
+                auto& payor = sourceIsSponsor ? b : c;
+                auto& payee = sourceIsSponsor ? c : b;
+
+                auto o1 =
+                    market
+                        .requireChangesWithOffer(
+                            {},
+                            [&] {
+                                return market.addOffer(
+                                    a1, {selling, buying, Price{1, 1}, 100});
+                            })
+                        .key;
+                auto o2 =
+                    market
+                        .requireChangesWithOffer(
+                            {},
+                            [&] {
+                                return market.addOffer(
+                                    a1, {selling, buying, Price{1, 1}, 100});
+                            })
+                        .key;
+                auto o3 =
+                    market
+                        .requireChangesWithOffer(
+                            {},
+                            [&] {
+                                return market.addOffer(
+                                    a2, {selling, buying, Price{1, 1}, 100});
+                            })
+                        .key;
+
+                doRevokeSponsorship(a1, o1.offerID, b);
+                doRevokeSponsorship(a1, o2.offerID, b);
+                doRevokeSponsorship(a2, o3.offerID, b);
+
+                SECTION("cross one offer partially")
+                {
+                    market.requireChanges(
+                        {{o1, {selling, buying, Price{1, 1}, 50}}},
+                        [&] { payor.pay(payee, buying, 50, selling, 50, {}); });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, offerKey(o1.sellerID, o1.offerID), 1,
+                                     &b.getPublicKey());
+                    checkSponsorship(ltx, offerKey(o2.sellerID, o2.offerID), 1,
+                                     &b.getPublicKey());
+                    checkSponsorship(ltx, offerKey(o3.sellerID, o3.offerID), 1,
+                                     &b.getPublicKey());
+                    checkSponsorship(ltx, a1, 0, nullptr, 4, 2, 0, 2);
+                    checkSponsorship(ltx, a2, 0, nullptr, 3, 2, 0, 1);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 2, 3, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+
+                SECTION("cross one offer fully")
+                {
+                    market.requireChanges({{o1, OfferState::DELETED}}, [&] {
+                        payor.pay(payee, buying, 100, selling, 100, {});
+                    });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, offerKey(o2.sellerID, o2.offerID), 1,
+                                     &b.getPublicKey());
+                    checkSponsorship(ltx, offerKey(o3.sellerID, o3.offerID), 1,
+                                     &b.getPublicKey());
+                    checkSponsorship(ltx, a1, 0, nullptr, 3, 2, 0, 1);
+                    checkSponsorship(ltx, a2, 0, nullptr, 3, 2, 0, 1);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 2, 2, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+
+                SECTION("cross one offer fully and one partially")
+                {
+                    market.requireChanges(
+                        {{o1, OfferState::DELETED},
+                         {o2, {selling, buying, Price{1, 1}, 50}}},
+                        [&] {
+                            payor.pay(payee, buying, 150, selling, 150, {});
+                        });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, offerKey(o2.sellerID, o2.offerID), 1,
+                                     &b.getPublicKey());
+                    checkSponsorship(ltx, offerKey(o3.sellerID, o3.offerID), 1,
+                                     &b.getPublicKey());
+                    checkSponsorship(ltx, a1, 0, nullptr, 3, 2, 0, 1);
+                    checkSponsorship(ltx, a2, 0, nullptr, 3, 2, 0, 1);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 2, 2, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+
+                SECTION("cross two offers fully")
+                {
+                    market.requireChanges(
+                        {{o1, OfferState::DELETED}, {o2, OfferState::DELETED}},
+                        [&] {
+                            payor.pay(payee, buying, 200, selling, 200, {});
+                        });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, offerKey(o3.sellerID, o3.offerID), 1,
+                                     &b.getPublicKey());
+                    checkSponsorship(ltx, a1, 0, nullptr, 2, 2, 0, 0);
+                    checkSponsorship(ltx, a2, 0, nullptr, 3, 2, 0, 1);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 2, 1, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+
+                SECTION("cross two offers fully and one partially")
+                {
+                    market.requireChanges(
+                        {{o1, OfferState::DELETED},
+                         {o2, OfferState::DELETED},
+                         {o3, {selling, buying, Price{1, 1}, 50}}},
+                        [&] {
+                            payor.pay(payee, buying, 250, selling, 250, {});
+                        });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, offerKey(o3.sellerID, o3.offerID), 1,
+                                     &b.getPublicKey());
+                    checkSponsorship(ltx, a1, 0, nullptr, 2, 2, 0, 0);
+                    checkSponsorship(ltx, a2, 0, nullptr, 3, 2, 0, 1);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 2, 1, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+
+                SECTION("cross three offers fully")
+                {
+                    market.requireChanges({{o1, OfferState::DELETED},
+                                           {o2, OfferState::DELETED},
+                                           {o3, OfferState::DELETED}},
+                                          [&] {
+                                              payor.pay(payee, buying, 300,
+                                                        selling, 300, {});
+                                          });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, a1, 0, nullptr, 2, 2, 0, 0);
+                    checkSponsorship(ltx, a2, 0, nullptr, 2, 2, 0, 0);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 2, 0, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+            };
+
+            for_versions_from(14, *app, [&]() {
+                SECTION("source, non-native for non-native")
+                {
+                    runTest(usd, idr, true);
+                }
+
+                SECTION("source, native for non-native")
+                {
+                    runTest(usd, xlm, true);
+                }
+
+                SECTION("source, non-native for native")
+                {
+                    runTest(xlm, usd, true);
+                }
+
+                SECTION("dest, non-native for non-native")
+                {
+                    runTest(usd, idr, false);
+                }
+
+                SECTION("dest, native for non-native")
+                {
+                    runTest(usd, xlm, false);
+                }
+
+                SECTION("dest, non-native for native")
+                {
+                    runTest(xlm, usd, false);
+                }
+            });
+        }
+
+        SECTION("offer sponsor is other offer account")
+        {
+            auto runTest = [&](Asset const& selling, Asset const& buying) {
+                auto a1 = prepareAccount("accA1");
+                auto a2 = prepareAccount("accA2");
+                auto b = prepareAccount("accB");
+                auto c = prepareAccount("accC");
+
+                auto o1 =
+                    market
+                        .requireChangesWithOffer(
+                            {},
+                            [&] {
+                                return market.addOffer(
+                                    a1, {selling, buying, Price{1, 1}, 100});
+                            })
+                        .key;
+                auto o2 =
+                    market
+                        .requireChangesWithOffer(
+                            {},
+                            [&] {
+                                return market.addOffer(
+                                    a1, {selling, buying, Price{1, 1}, 100});
+                            })
+                        .key;
+                auto o3 =
+                    market
+                        .requireChangesWithOffer(
+                            {},
+                            [&] {
+                                return market.addOffer(
+                                    a2, {selling, buying, Price{1, 1}, 100});
+                            })
+                        .key;
+
+                doRevokeSponsorship(a1, o1.offerID, a2);
+                doRevokeSponsorship(a1, o2.offerID, a2);
+                doRevokeSponsorship(a2, o3.offerID, a1);
+
+                SECTION("cross one offer partially")
+                {
+                    market.requireChanges(
+                        {{o1, {selling, buying, Price{1, 1}, 50}}},
+                        [&] { b.pay(c, buying, 50, selling, 50, {}); });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, offerKey(o1.sellerID, o1.offerID), 1,
+                                     &a2.getPublicKey());
+                    checkSponsorship(ltx, offerKey(o2.sellerID, o2.offerID), 1,
+                                     &a2.getPublicKey());
+                    checkSponsorship(ltx, offerKey(o3.sellerID, o3.offerID), 1,
+                                     &a1.getPublicKey());
+                    checkSponsorship(ltx, a1, 0, nullptr, 4, 2, 1, 2);
+                    checkSponsorship(ltx, a2, 0, nullptr, 3, 2, 2, 1);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 0, 0, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+
+                SECTION("cross one offer fully")
+                {
+                    market.requireChanges({{o1, OfferState::DELETED}}, [&] {
+                        b.pay(c, buying, 100, selling, 100, {});
+                    });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, offerKey(o2.sellerID, o2.offerID), 1,
+                                     &a2.getPublicKey());
+                    checkSponsorship(ltx, offerKey(o3.sellerID, o3.offerID), 1,
+                                     &a1.getPublicKey());
+                    checkSponsorship(ltx, a1, 0, nullptr, 3, 2, 1, 1);
+                    checkSponsorship(ltx, a2, 0, nullptr, 3, 2, 1, 1);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 0, 0, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+
+                SECTION("cross one offer fully and one partially")
+                {
+                    market.requireChanges(
+                        {{o1, OfferState::DELETED},
+                         {o2, {selling, buying, Price{1, 1}, 50}}},
+                        [&] { b.pay(c, buying, 150, selling, 150, {}); });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, offerKey(o2.sellerID, o2.offerID), 1,
+                                     &a2.getPublicKey());
+                    checkSponsorship(ltx, offerKey(o3.sellerID, o3.offerID), 1,
+                                     &a1.getPublicKey());
+                    checkSponsorship(ltx, a1, 0, nullptr, 3, 2, 1, 1);
+                    checkSponsorship(ltx, a2, 0, nullptr, 3, 2, 1, 1);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 0, 0, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+
+                SECTION("cross two offers fully")
+                {
+                    market.requireChanges(
+                        {{o1, OfferState::DELETED}, {o2, OfferState::DELETED}},
+                        [&] { b.pay(c, buying, 200, selling, 200, {}); });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, offerKey(o3.sellerID, o3.offerID), 1,
+                                     &a1.getPublicKey());
+                    checkSponsorship(ltx, a1, 0, nullptr, 2, 2, 1, 0);
+                    checkSponsorship(ltx, a2, 0, nullptr, 3, 2, 0, 1);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 0, 0, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+
+                SECTION("cross two offers fully and one partially")
+                {
+                    market.requireChanges(
+                        {{o1, OfferState::DELETED},
+                         {o2, OfferState::DELETED},
+                         {o3, {selling, buying, Price{1, 1}, 50}}},
+                        [&] { b.pay(c, buying, 250, selling, 250, {}); });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, offerKey(o3.sellerID, o3.offerID), 1,
+                                     &a1.getPublicKey());
+                    checkSponsorship(ltx, a1, 0, nullptr, 2, 2, 1, 0);
+                    checkSponsorship(ltx, a2, 0, nullptr, 3, 2, 0, 1);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 0, 0, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+
+                SECTION("cross three offers fully")
+                {
+                    market.requireChanges(
+                        {{o1, OfferState::DELETED},
+                         {o2, OfferState::DELETED},
+                         {o3, OfferState::DELETED}},
+                        [&] { b.pay(c, buying, 300, selling, 300, {}); });
+
+                    LedgerTxn ltx(app->getLedgerTxnRoot());
+                    checkSponsorship(ltx, a1, 0, nullptr, 2, 2, 0, 0);
+                    checkSponsorship(ltx, a2, 0, nullptr, 2, 2, 0, 0);
+                    checkSponsorship(ltx, b, 0, nullptr, 2, 0, 0, 0);
+                    checkSponsorship(ltx, c, 0, nullptr, 2, 0, 0, 0);
+                }
+            };
+
+            for_versions_from(14, *app, [&]() {
+                SECTION("non-native for non-native")
+                {
+                    runTest(usd, idr);
+                }
+
+                SECTION("native for non-native")
+                {
+                    runTest(usd, xlm);
+                }
+
+                SECTION("non-native for native")
+                {
+                    runTest(xlm, usd);
+                }
+            });
+        }
+    }
+
+    SECTION("crossed offers release sponsorships allowing payment to succeed "
+            "for source")
+    {
+        auto const minBal1 = app->getLedgerManager().getLastMinBalance(1);
+
+        for_versions_from(14, *app, [&]() {
+            auto payor = root.create("payor", minBal1);
+
+            auto payee = root.create("payee", minBal1 + txfee);
+            payee.changeTrust(usd, 10000);
+
+            auto mm = root.create("mm", minBal1 + txfee + 10000);
+            mm.changeTrust(usd, 10000);
+            gateway2.pay(mm, usd, 10000);
+
+            {
+                auto tx = transactionFrameFromOps(
+                    app->getNetworkID(), root,
+                    {payor.op(beginSponsoringFutureReserves(mm)),
+                     mm.op(manageOffer(0, usd, xlm, Price{1, 1}, 10000)),
+                     mm.op(endSponsoringFutureReserves())},
+                    {payor, mm});
+
+                LedgerTxn ltx(app->getLedgerTxnRoot());
+                TransactionMeta txm(2);
+                REQUIRE(tx->checkValid(ltx, 0, 0, 0));
+                REQUIRE(tx->apply(*app, ltx, txm));
+                ltx.commit();
+            }
+
+            root.pay(payor, txfee);
+            REQUIRE_THROWS_AS(payor.pay(payee, xlm, 10000),
+                              ex_PAYMENT_UNDERFUNDED);
+
+            root.pay(payor, txfee);
+            REQUIRE_NOTHROW(payor.pay(payee, xlm, 10000, usd, 10000, {}));
+        });
+    }
+}
+
+TEST_CASE("path payment uses all offers in a loop", "[tx][pathpayment]")
+{
+    // This test would downgrade the bucket protocol from >12 to 12
+    // with USE_CONFIG_FOR_GENESIS.  Some other tests in this module,
+    // however, rely on that being set, so we separate this one
+    // out into a test case with its own Application object.
+    Config cfg = getTestConfig();
+    cfg.USE_CONFIG_FOR_GENESIS = false;
+
+    VirtualClock clock;
+    auto app = createTestApplication(clock, cfg);
+    app->start();
+
+    // set up world
+    auto root = TestAccount::createRoot(*app);
+    auto xlm = makeNativeAsset();
+    auto txfee = app->getLedgerManager().getLastTxFee();
+
+    auto const minBalance1 =
+        app->getLedgerManager().getLastMinBalance(1) + 10 * txfee;
+    auto const minBalance2 =
+        app->getLedgerManager().getLastMinBalance(2) + 10 * txfee;
+    auto const minBalance3 =
+        app->getLedgerManager().getLastMinBalance(3) + 10 * txfee;
+    auto const minBalance4 =
+        app->getLedgerManager().getLastMinBalance(4) + 10 * txfee;
+
+    auto const paymentAmount = minBalance3;
+    auto const morePayment = paymentAmount / 2;
+
+    // sets up gateway account
+    auto const gatewayPayment = minBalance2 + morePayment;
+    auto gateway = root.create("gate", gatewayPayment);
+
+    // sets up gateway2 account
+    auto gateway2 = root.create("gate2", gatewayPayment);
+
+    auto cur1 = makeAsset(gateway, "CUR1");
+    auto cur2 = makeAsset(gateway, "CUR2");
+    auto cur3 = makeAsset(gateway2, "CUR3");
+    auto cur4 = makeAsset(gateway2, "CUR4");
+
+    auto useAllOffersInLoop = [&](TestAccount* issuerToDelete) {
+        for_all_versions(*app, [&] {
+            auto market = TestMarket{*app};
+            auto source = root.create("source", minBalance4);
+            auto destination = root.create("destination", minBalance1);
+            auto mm12 = root.create("mm12", minBalance3);
+            auto mm23 = root.create("mm23", minBalance3);
+            auto mm34 = root.create("mm34", minBalance3);
+            auto mm41 = root.create("mm41", minBalance3);
+
+            source.changeTrust(cur1, 16000);
+            mm12.changeTrust(cur1, 16000);
+            mm12.changeTrust(cur2, 16000);
+            mm23.changeTrust(cur2, 16000);
+            mm23.changeTrust(cur3, 16000);
+            mm34.changeTrust(cur3, 16000);
+            mm34.changeTrust(cur4, 16000);
+            mm41.changeTrust(cur4, 16000);
+            mm41.changeTrust(cur1, 16000);
+            destination.changeTrust(cur4, 16000);
+
+            gateway.pay(source, cur1, 8000);
+            gateway.pay(mm12, cur2, 8000);
+            gateway2.pay(mm23, cur3, 8000);
+            gateway2.pay(mm34, cur4, 8000);
+            gateway.pay(mm41, cur1, 8000);
+
+            auto o1 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm12, {cur2, cur1, Price{2, 1}, 1000});
+            });
+            auto o2 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm23, {cur3, cur2, Price{2, 1}, 1000});
+            });
+            auto o3 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm34, {cur4, cur3, Price{2, 1}, 1000});
+            });
+            auto o4 = market.requireChangesWithOffer({}, [&] {
+                return market.addOffer(mm41, {cur1, cur4, Price{2, 1}, 1000});
+            });
+
+            uint32_t ledgerVersion;
+            {
+                LedgerTxn ltx(app->getLedgerTxnRoot());
+                ledgerVersion = ltx.loadHeader().current().ledgerVersion;
+            }
+            if (issuerToDelete && ledgerVersion >= 13)
+            {
+                closeLedgerOn(*app, 2, 1, 1, 2016);
+                // remove issuer
+                issuerToDelete->merge(root);
+            }
+
+            auto actual = std::vector<ClaimOfferAtom>{};
+            market.requireChanges(
+                {{o1.key, {cur2, cur1, Price{2, 1}, 320}},
+                 {o2.key, {cur3, cur2, Price{2, 1}, 660}},
+                 {o3.key, {cur4, cur3, Price{2, 1}, 830}},
+                 {o4.key, {cur1, cur4, Price{2, 1}, 920}}},
+                [&] {
+                    actual = source
+                                 .pay(destination, cur1, 2000, cur4, 10,
+                                      {cur1, cur2, cur3, cur4, cur1, cur2, cur3,
+                                       cur4})
+                                 .success()
+                                 .offers;
+                });
+            auto expected = std::vector<ClaimOfferAtom>{
+                o1.exchanged(640, 1280), o2.exchanged(320, 640),
+                o3.exchanged(160, 320),  o4.exchanged(80, 160),
+                o1.exchanged(40, 80),    o2.exchanged(20, 40),
+                o3.exchanged(10, 20)};
+            REQUIRE(actual == expected);
+            // clang-format off
+            market.requireBalances(
+                {{source, {{xlm, minBalance4 - 2 * txfee}, {cur1, 6720}, {cur2, 0}, {cur3, 0}, {cur4, 0}}},
+                {mm12, {{xlm, minBalance3 - 3 * txfee}, {cur1, 1360}, {cur2, 7320}, {cur3, 0}, {cur4, 0}}},
+                {mm23, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 680}, {cur3, 7660}, {cur4, 0}}},
+                {mm34, {{xlm, minBalance3 - 3 * txfee}, {cur1, 0}, {cur2, 0}, {cur3, 340}, {cur4, 7830}}},
+                {mm41, {{xlm, minBalance3 - 3 * txfee}, {cur1, 7920}, {cur2, 0}, {cur3, 0}, {cur4, 160}}},
+                {destination, {{xlm, minBalance1 - txfee}, {cur1, 0}, {cur2, 0}, {cur3, 0}, {cur4, 10}}}});
+            // clang-format on
+        });
+    };
+
+    SECTION("no issuers missing")
+    {
+        useAllOffersInLoop(nullptr);
+    }
+
+    SECTION("outside issuers missing")
+    {
+        useAllOffersInLoop(&gateway);
+    }
+
+    SECTION("inside issuers missing")
+    {
+        useAllOffersInLoop(&gateway2);
     }
 }

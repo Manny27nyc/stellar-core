@@ -14,6 +14,7 @@
 #include "overlay/Tracker.h"
 #include "util/Logging.h"
 #include "xdrpp/marshal.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -26,7 +27,8 @@ ItemFetcher::ItemFetcher(Application& app, AskPeer askPeer)
 void
 ItemFetcher::fetch(Hash const& itemHash, const SCPEnvelope& envelope)
 {
-    CLOG(TRACE, "Overlay") << "fetch " << hexAbbrev(itemHash);
+    ZoneScoped;
+    CLOG_TRACE(Overlay, "fetch {}", hexAbbrev(itemHash));
     auto entryIt = mTrackers.find(itemHash);
     if (entryIt == mTrackers.end())
     { // not being tracked
@@ -46,13 +48,14 @@ ItemFetcher::fetch(Hash const& itemHash, const SCPEnvelope& envelope)
 void
 ItemFetcher::stopFetch(Hash const& itemHash, SCPEnvelope const& envelope)
 {
+    ZoneScoped;
     const auto& iter = mTrackers.find(itemHash);
     if (iter != mTrackers.end())
     {
         auto const& tracker = iter->second;
 
-        CLOG(TRACE, "Overlay")
-            << "stopFetch " << hexAbbrev(itemHash) << " : " << tracker->size();
+        CLOG_TRACE(Overlay, "stopFetch {} : {}", hexAbbrev(itemHash),
+                   tracker->size());
         tracker->discard(envelope);
         if (tracker->empty())
         {
@@ -63,7 +66,7 @@ ItemFetcher::stopFetch(Hash const& itemHash, SCPEnvelope const& envelope)
     }
     else
     {
-        CLOG(TRACE, "Overlay") << "stopFetch untracked " << hexAbbrev(itemHash);
+        CLOG_TRACE(Overlay, "stopFetch untracked {}", hexAbbrev(itemHash));
     }
 }
 
@@ -103,13 +106,13 @@ ItemFetcher::stopFetchingBelow(uint64 slotIndex)
     // all sorts of evil side effects
     mApp.postOnMainThread(
         [this, slotIndex]() { stopFetchingBelowInternal(slotIndex); },
-        {VirtualClock::ExecutionCategory::Type::NORMAL_EVENT,
-         "ItemFetcher: stopFetchingBelow"});
+        "ItemFetcher: stopFetchingBelow");
 }
 
 void
 ItemFetcher::stopFetchingBelowInternal(uint64 slotIndex)
 {
+    ZoneScoped;
     for (auto iter = mTrackers.begin(); iter != mTrackers.end();)
     {
         if (!iter->second->clearEnvelopesBelow(slotIndex))
@@ -126,6 +129,7 @@ ItemFetcher::stopFetchingBelowInternal(uint64 slotIndex)
 void
 ItemFetcher::doesntHave(Hash const& itemHash, Peer::pointer peer)
 {
+    ZoneScoped;
     const auto& iter = mTrackers.find(itemHash);
     if (iter != mTrackers.end())
     {
@@ -136,6 +140,7 @@ ItemFetcher::doesntHave(Hash const& itemHash, Peer::pointer peer)
 void
 ItemFetcher::recv(Hash itemHash, medida::Timer& timer)
 {
+    ZoneScoped;
     const auto& iter = mTrackers.find(itemHash);
 
     if (iter != mTrackers.end())
@@ -144,8 +149,8 @@ ItemFetcher::recv(Hash itemHash, medida::Timer& timer)
         // calling recv on the same itemHash
         auto& tracker = iter->second;
 
-        CLOG(TRACE, "Overlay")
-            << "Recv " << hexAbbrev(itemHash) << " : " << tracker->size();
+        CLOG_TRACE(Overlay, "Recv {} : {}", hexAbbrev(itemHash),
+                   tracker->size());
 
         timer.Update(tracker->getDuration());
         while (!tracker->empty())
@@ -158,7 +163,7 @@ ItemFetcher::recv(Hash itemHash, medida::Timer& timer)
     }
     else
     {
-        CLOG(TRACE, "Overlay") << "Recv untracked " << hexAbbrev(itemHash);
+        CLOG_TRACE(Overlay, "Recv untracked {}", hexAbbrev(itemHash));
     }
 }
 

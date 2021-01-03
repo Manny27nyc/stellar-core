@@ -8,6 +8,7 @@
 #include "overlay/StellarXDR.h"
 #include "util/SecretValue.h"
 #include "util/Timer.h"
+#include "util/UnorderedMap.h"
 #include "util/optional.h"
 
 #include <map>
@@ -55,7 +56,7 @@ class Config : public std::enable_shared_from_this<Config>
 
     void validateConfig(ValidationThresholdLevels thresholdLevel);
     void loadQset(std::shared_ptr<cpptoml::table> group, SCPQuorumSet& qset,
-                  int level);
+                  uint32 level);
 
     void processConfig(std::shared_ptr<cpptoml::table>);
 
@@ -76,12 +77,11 @@ class Config : public std::enable_shared_from_this<Config>
     std::string toString(ValidatorQuality q) const;
     ValidatorQuality parseQuality(std::string const& q) const;
 
-    std::vector<ValidatorEntry>
-    parseValidators(std::shared_ptr<cpptoml::base> validators,
-                    std::unordered_map<std::string, ValidatorQuality> const&
-                        domainQualityMap);
+    std::vector<ValidatorEntry> parseValidators(
+        std::shared_ptr<cpptoml::base> validators,
+        UnorderedMap<std::string, ValidatorQuality> const& domainQualityMap);
 
-    std::unordered_map<std::string, ValidatorQuality>
+    UnorderedMap<std::string, ValidatorQuality>
     parseDomainsQuality(std::shared_ptr<cpptoml::base> domainsQuality);
 
     static SCPQuorumSet
@@ -92,10 +92,9 @@ class Config : public std::enable_shared_from_this<Config>
     static SCPQuorumSet
     generateQuorumSet(std::vector<ValidatorEntry> const& validators);
 
-    void
-    addSelfToValidators(std::vector<ValidatorEntry>& validators,
-                        std::unordered_map<std::string, ValidatorQuality> const&
-                            domainQualityMap);
+    void addSelfToValidators(
+        std::vector<ValidatorEntry>& validators,
+        UnorderedMap<std::string, ValidatorQuality> const& domainQualityMap);
 
     void verifyHistoryValidatorsBlocking(
         std::vector<ValidatorEntry> const& validators);
@@ -119,12 +118,12 @@ class Config : public std::enable_shared_from_this<Config>
     // application config
 
     // The default way stellar-core starts is to load the state from disk and
-    // catch up to the network before starting SCP. If you need different
-    // behavior you need to use new-db or force-scp which sets the following
-    // flags:
+    // start a consensus round (if node is validating), then maybe trigger
+    // catchup. If you need different behavior you need to use new-db or
+    // --wait-for-consensus option which sets the following flag to false:
 
     // SCP will start running immediately using the current local state to
-    // participate in consensus. DO NOT INCLUDE THIS IN A CONFIG FILE
+    // participate in consensus
     bool FORCE_SCP;
 
     // This is a mode for testing. It prevents you from trying to connect to
@@ -207,6 +206,17 @@ class Config : public std::enable_shared_from_this<Config>
     // fees, and scp history in the database
     bool MODE_STORES_HISTORY;
 
+    // A config parameter that controls whether core automatically catches up
+    // when it has buffered enough input; if false an out-of-sync node will
+    // remain out-of-sync, buffering ledgers from the network in memory until
+    // it is halted.
+    bool MODE_DOES_CATCHUP;
+
+    // A config parameter that controls whether the application starts the
+    // overlay on startup, or waits for a later startup after performing some
+    // other pre-overlay-start operations (eg. offline catchup).
+    bool MODE_AUTO_STARTS_OVERLAY;
+
     // A config to allow connections to localhost
     // this should only be enabled when testing as it's a security issue
     bool ALLOW_LOCALHOST_FOR_TESTING;
@@ -267,11 +277,11 @@ class Config : public std::enable_shared_from_this<Config>
     std::vector<std::string> KNOWN_CURSORS;
 
     uint32_t LEDGER_PROTOCOL_VERSION;
-    VirtualClock::time_point TESTING_UPGRADE_DATETIME;
+    VirtualClock::system_time_point TESTING_UPGRADE_DATETIME;
 
     // maximum allowed drift for close time when joining the network for the
     // first time
-    uint64 MAXIMUM_LEDGER_CLOSETIME_DRIFT;
+    time_t MAXIMUM_LEDGER_CLOSETIME_DRIFT;
 
     // note: all versions in the range
     // [OVERLAY_PROTOCOL_MIN_VERSION, OVERLAY_PROTOCOL_VERSION] must be handled
@@ -279,6 +289,7 @@ class Config : public std::enable_shared_from_this<Config>
     uint32_t OVERLAY_PROTOCOL_VERSION;     // max overlay version understood
     std::string VERSION_STR;
     std::string LOG_FILE_PATH;
+    bool LOG_COLOR;
     std::string BUCKET_DIR_PATH;
     uint32_t TESTING_UPGRADE_DESIRED_FEE; // in stroops
     uint32_t TESTING_UPGRADE_RESERVE;     // in stroops
@@ -298,8 +309,6 @@ class Config : public std::enable_shared_from_this<Config>
     unsigned short PEER_AUTHENTICATION_TIMEOUT;
     unsigned short PEER_TIMEOUT;
     unsigned short PEER_STRAGGLER_TIMEOUT;
-    std::chrono::milliseconds MAX_BATCH_READ_PERIOD_MS;
-    int MAX_BATCH_READ_COUNT;
     int MAX_BATCH_WRITE_COUNT;
     int MAX_BATCH_WRITE_BYTES;
     static constexpr auto const POSSIBLY_PREFERRED_EXTRA = 2;
@@ -378,6 +387,10 @@ class Config : public std::enable_shared_from_this<Config>
     bool TEST_CASES_ENABLED;
 #endif
 
+    // Any transaction that reaches the TransactionQueue will be rejected if it
+    // contains an operation in this list.
+    std::vector<OperationType> EXCLUDE_TRANSACTIONS_CONTAINING_OPERATION_TYPE;
+
     Config();
 
     void load(std::string const& filename);
@@ -402,5 +415,9 @@ class Config : public std::enable_shared_from_this<Config>
 
     // function to stringify a quorum set
     std::string toString(SCPQuorumSet const& qset);
+
+    // A special name to be used for stdin in stead of a file name in command
+    // line arguments.
+    static std::string const STDIN_SPECIAL_NAME;
 };
 }

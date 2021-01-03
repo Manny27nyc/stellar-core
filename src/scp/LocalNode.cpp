@@ -13,9 +13,9 @@
 #include "util/XDROperators.h"
 #include "util/numeric.h"
 #include "xdrpp/marshal.h"
+#include <Tracy.hpp>
 #include <algorithm>
 #include <functional>
-#include <unordered_set>
 
 namespace stellar
 {
@@ -24,14 +24,14 @@ LocalNode::LocalNode(NodeID const& nodeID, bool isValidator,
     : mNodeID(nodeID), mIsValidator(isValidator), mQSet(qSet), mSCP(scp)
 {
     normalizeQSet(mQSet);
-    mQSetHash = sha256(xdr::xdr_to_opaque(mQSet));
+    auto const& scpDriver = mSCP->getDriver();
+    mQSetHash = scpDriver.getHashOf({xdr::xdr_to_opaque(mQSet)});
 
-    CLOG(INFO, "SCP") << "LocalNode::LocalNode"
-                      << "@" << KeyUtils::toShortString(mNodeID)
-                      << " qSet: " << hexAbbrev(mQSetHash);
+    CLOG_INFO(SCP, "LocalNode::LocalNode@{} qSet: {}",
+              KeyUtils::toShortString(mNodeID), hexAbbrev(mQSetHash));
 
     mSingleQSet = std::make_shared<SCPQuorumSet>(buildSingletonQSet(mNodeID));
-    gSingleQSetHash = sha256(xdr::xdr_to_opaque(*mSingleQSet));
+    gSingleQSetHash = scpDriver.getHashOf({xdr::xdr_to_opaque(*mSingleQSet)});
 }
 
 SCPQuorumSet
@@ -46,7 +46,8 @@ LocalNode::buildSingletonQSet(NodeID const& nodeID)
 void
 LocalNode::updateQuorumSet(SCPQuorumSet const& qSet)
 {
-    mQSetHash = sha256(xdr::xdr_to_opaque(qSet));
+    ZoneScoped;
+    mQSetHash = mSCP->getDriver().getHashOf({xdr::xdr_to_opaque(qSet)});
     mQSet = qSet;
 }
 
@@ -68,18 +69,25 @@ LocalNode::getSingletonQSet(NodeID const& nodeID)
     return std::make_shared<SCPQuorumSet>(buildSingletonQSet(nodeID));
 }
 
-void
+bool
 LocalNode::forAllNodes(SCPQuorumSet const& qset,
-                       std::function<void(NodeID const&)> proc)
+                       std::function<bool(NodeID const&)> proc)
 {
     for (auto const& n : qset.validators)
     {
-        proc(n);
+        if (!proc(n))
+        {
+            return false;
+        }
     }
     for (auto const& q : qset.innerSets)
     {
-        forAllNodes(q, proc);
+        if (!forAllNodes(q, proc))
+        {
+            return false;
+        }
     }
+    return true;
 }
 
 uint64
@@ -215,6 +223,7 @@ LocalNode::isVBlocking(SCPQuorumSet const& qSet,
                        std::map<NodeID, SCPEnvelopeWrapperPtr> const& map,
                        std::function<bool(SCPStatement const&)> const& filter)
 {
+    ZoneScoped;
     std::vector<NodeID> pNodes;
     for (auto const& it : map)
     {
@@ -234,6 +243,7 @@ LocalNode::isQuorum(
     std::function<SCPQuorumSetPtr(SCPStatement const&)> const& qfun,
     std::function<bool(SCPStatement const&)> const& filter)
 {
+    ZoneScoped;
     std::vector<NodeID> pNodes;
     for (auto const& it : map)
     {
@@ -291,6 +301,7 @@ LocalNode::findClosestVBlocking(SCPQuorumSet const& qset,
                                 std::set<NodeID> const& nodes,
                                 NodeID const* excluded)
 {
+    ZoneScoped;
     size_t leftTillBlock =
         ((1 + qset.validators.size() + qset.innerSets.size()) - qset.threshold);
 

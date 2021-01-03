@@ -10,7 +10,9 @@
 #include "ledger/LedgerTxnHeader.h"
 #include "ledger/TrustLineWrapper.h"
 #include "main/Application.h"
+#include "transactions/SponsorshipUtils.h"
 #include "transactions/TransactionUtils.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -30,6 +32,7 @@ AllowTrustOpFrame::getThresholdLevel() const
 bool
 AllowTrustOpFrame::doApply(AbstractLedgerTxn& ltx)
 {
+    ZoneNamedN(applyZone, "AllowTrustOp apply", true);
     if (ltx.loadHeader().current().ledgerVersion > 2)
     {
         if (mAllowTrust.trustor == getSourceID())
@@ -134,7 +137,8 @@ AllowTrustOpFrame::doApply(AbstractLedgerTxn& ltx)
 
             releaseLiabilities(ltx, header, offer);
             auto trustAcc = stellar::loadAccount(ltx, mAllowTrust.trustor);
-            addNumEntries(header, trustAcc, -1);
+            removeEntryWithPossibleSponsorship(ltx, header, offer.current(),
+                                               trustAcc);
             offer.erase();
         }
     }

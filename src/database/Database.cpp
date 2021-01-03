@@ -9,10 +9,13 @@
 #include "main/Application.h"
 #include "main/Config.h"
 #include "overlay/StellarXDR.h"
+#include "util/Decoder.h"
 #include "util/GlobalChecks.h"
 #include "util/Logging.h"
 #include "util/Timer.h"
 #include "util/types.h"
+#include <error.h>
+#include <fmt/format.h>
 
 #include "bucket/BucketManager.h"
 #include "herder/HerderPersistence.h"
@@ -30,8 +33,10 @@
 #include "medida/counter.h"
 #include "medida/metrics_registry.h"
 #include "medida/timer.h"
+#include "xdr/Stellar-ledger-entries.h"
 
 #include <lib/soci/src/backends/sqlite3/soci-sqlite3.h>
+#include <string>
 #ifdef USE_POSTGRES
 #include <lib/soci/src/backends/postgresql/soci-postgresql.h>
 #endif
@@ -56,8 +61,8 @@ using namespace std;
 bool Database::gDriversRegistered = false;
 
 // smallest schema version supported
-static unsigned long const MIN_SCHEMA_VERSION = 9;
-static unsigned long const SCHEMA_VERSION = 12;
+static unsigned long const MIN_SCHEMA_VERSION = 12;
+static unsigned long const SCHEMA_VERSION = 13;
 
 // These should always match our compiled version precisely, since we are
 // using a bundled version to get access to carray(). But in case someone
@@ -181,16 +186,12 @@ Database::Database(Application& app)
           app.getMetrics().NewMeter({"database", "query", "exec"}, "query"))
     , mStatementsSize(
           app.getMetrics().NewCounter({"database", "memory", "statements"}))
-    , mExcludedQueryTime(0)
-    , mExcludedTotalTime(0)
-    , mLastIdleQueryTime(0)
-    , mLastIdleTotalTime(app.getClock().now())
 {
     registerDrivers();
 
-    CLOG(INFO, "Database") << "Connecting to: "
-                           << removePasswordFromConnectionString(
-                                  app.getConfig().DATABASE.value);
+    CLOG_INFO(
+        Database, "Connecting to: {}",
+        removePasswordFromConnectionString(app.getConfig().DATABASE.value));
     mSession.open(app.getConfig().DATABASE.value);
     DatabaseConfigureSessionOp op(mSession);
     doDatabaseTypeSpecificOperation(op);
@@ -204,53 +205,34 @@ Database::applySchemaUpgrade(unsigned long vers)
     soci::transaction tx(mSession);
     switch (vers)
     {
-    case 10:
-        // add tracking table information
-        mApp.getHerderPersistence().createQuorumTrackingTable(mSession);
-        break;
-    case 11:
+    case 13:
         if (!mApp.getConfig().MODE_USES_IN_MEMORY_LEDGER)
         {
-            mSession << "DROP INDEX IF EXISTS bestofferindex;";
-            mSession << "CREATE INDEX bestofferindex ON offers "
-                        "(sellingasset,buyingasset,price,offerid);";
+            // Add columns for the LedgerEntry extension to each of
+            // the tables that stores a type of ledger entry.
+            addTextColumn("accounts", "ledgerext");
+            addTextColumn("trustlines", "ledgerext");
+            addTextColumn("accountdata", "ledgerext");
+            addTextColumn("offers", "ledgerext");
+            // Absorb the explicit columns of the extension fields of
+            // AccountEntry and TrustLineEntry into single opaque
+            // blobs of XDR each of which represents an entire extension.
+            convertAccountExtensionsToOpaqueXDR();
+            convertTrustLineExtensionsToOpaqueXDR();
+            // Neither earlier schema versions nor the one that we're upgrading
+            // to now had any extension columns in the offers or accountdata
+            // tables, but we add columns in this version, even though we're not
+            // going to use them for anything other than writing out opaque
+            // base64-encoded empty v0 XDR extensions, so that, as with the
+            // other LedgerEntry extensions, we'll be able to add such
+            // extensions in the future without bumping the database schema
+            // version, writing any upgrade code, or changing the SQL that reads
+            // and writes those tables.
+            addTextColumn("offers", "extension");
+            addTextColumn("accountdata", "extension");
+
+            mApp.getLedgerTxnRoot().dropClaimableBalances();
         }
-        break;
-    case 12:
-        if (!isSqlite())
-        {
-            // Set column collations to "C" if postgres; sqlite doesn't support
-            // altering them at all (and the defaults are correct anyways).
-            mSession << "ALTER TABLE accounts "
-                     << "ALTER COLUMN accountid "
-                     << "TYPE VARCHAR(56) COLLATE \"C\"";
-
-            mSession << "ALTER TABLE accountdata "
-                     << "ALTER COLUMN accountid "
-                     << "TYPE VARCHAR(56) COLLATE \"C\", "
-                     << "ALTER COLUMN dataname "
-                     << "TYPE VARCHAR(88) COLLATE \"C\"";
-
-            mSession << "ALTER TABLE offers "
-                     << "ALTER COLUMN sellerid "
-                     << "TYPE VARCHAR(56) COLLATE \"C\", "
-                     << "ALTER COLUMN buyingasset "
-                     << "TYPE TEXT COLLATE \"C\", "
-                     << "ALTER COLUMN sellingasset "
-                     << "TYPE TEXT COLLATE \"C\"";
-
-            mSession << "ALTER TABLE trustlines "
-                     << "ALTER COLUMN accountid "
-                     << "TYPE VARCHAR(56) COLLATE \"C\", "
-                     << "ALTER COLUMN issuer "
-                     << "TYPE VARCHAR(56) COLLATE \"C\", "
-                     << "ALTER COLUMN assetcode "
-                     << "TYPE VARCHAR(12) COLLATE \"C\"";
-        }
-
-        // With inflation disabled, it's not worth keeping
-        // the accountbalances index around.
-        mSession << "DROP INDEX IF EXISTS accountbalances";
         break;
     default:
         throw std::runtime_error("Unknown DB schema version");
@@ -277,16 +259,196 @@ Database::upgradeToCurrentSchema()
                          std::to_string(SCHEMA_VERSION));
         throw std::runtime_error(s);
     }
+    actBeforeDBSchemaUpgrade();
     while (vers < SCHEMA_VERSION)
     {
         ++vers;
-        CLOG(INFO, "Database")
-            << "Applying DB schema upgrade to version " << vers;
+        CLOG_INFO(Database, "Applying DB schema upgrade to version {}", vers);
         applySchemaUpgrade(vers);
         putSchemaVersion(vers);
     }
-    CLOG(INFO, "Database") << "DB schema is in current version";
+    CLOG_INFO(Database, "DB schema is in current version");
     assert(vers == SCHEMA_VERSION);
+}
+
+void
+Database::addTextColumn(std::string const& table, std::string const& column)
+{
+    std::string addColumnStr("ALTER TABLE " + table + " ADD " + column +
+                             " TEXT;");
+    CLOG_INFO(Database, "Adding column '{}' to table '{}'", column, table);
+    mSession << addColumnStr;
+}
+
+void
+Database::dropNullableColumn(std::string const& table,
+                             std::string const& column)
+{
+    // SQLite doesn't give us a way of dropping a column with a single
+    // SQL command.  If we need it in production, we could re-create the
+    // table without the column and drop the old one.  Since we currently
+    // use SQLite only for testing and PostgreSQL in production, we simply
+    // leave the unused columm around in SQLite at the moment, and NULL
+    // out all of the cells in that column.
+    if (!isSqlite())
+    {
+        std::string dropColumnStr("ALTER TABLE " + table + " DROP COLUMN " +
+                                  column);
+        CLOG_INFO(Database, "Dropping column '{}' from table '{}'", column,
+                  table);
+
+        mSession << dropColumnStr;
+    }
+    else
+    {
+        std::string nullColumnStr("UPDATE " + table + " SET " + column +
+                                  " = NULL");
+        CLOG_INFO(Database,
+                  "Setting all cells of column '{}' in table '{}' to NULL",
+                  column, table);
+
+        mSession << nullColumnStr;
+    }
+}
+
+std::string
+Database::getOldLiabilitySelect(std::string const& table,
+                                std::string const& fields)
+{
+    return fmt::format("SELECT {}, "
+                       "buyingliabilities, sellingliabilities FROM {} WHERE "
+                       "buyingliabilities IS NOT NULL OR "
+                       "sellingliabilities IS NOT NULL",
+                       fields, table);
+}
+
+void
+Database::convertAccountExtensionsToOpaqueXDR()
+{
+    addTextColumn("accounts", "extension");
+    copyIndividualAccountExtensionFieldsToOpaqueXDR();
+    dropNullableColumn("accounts", "buyingliabilities");
+    dropNullableColumn("accounts", "sellingliabilities");
+}
+
+void
+Database::convertTrustLineExtensionsToOpaqueXDR()
+{
+    addTextColumn("trustlines", "extension");
+    copyIndividualTrustLineExtensionFieldsToOpaqueXDR();
+    dropNullableColumn("trustlines", "buyingliabilities");
+    dropNullableColumn("trustlines", "sellingliabilities");
+}
+
+void
+Database::copyIndividualAccountExtensionFieldsToOpaqueXDR()
+{
+    std::string const tableStr = "accounts";
+
+    CLOG_INFO(Database, "Updating extension schema for {}", tableStr);
+
+    // <accountID, extension>
+    struct Fields
+    {
+        std::string mAccountID;
+        std::string mExtension;
+    };
+
+    std::string const fieldsStr = "accountid";
+    std::string const selectStr = getOldLiabilitySelect(tableStr, fieldsStr);
+    auto makeFields = [](soci::row const& row) {
+        AccountEntry::_ext_t extension;
+        // getOldLiabilitySelect() places the buying and selling extension
+        // column names after the key field in the SQL select string.
+        extension.v(1);
+        extension.v1().liabilities.buying = row.get<long long>(1);
+        extension.v1().liabilities.selling = row.get<long long>(2);
+        return Fields{row.get<std::string>(0),
+                      decoder::encode_b64(xdr::xdr_to_opaque(extension))};
+    };
+
+    std::string const updateStr =
+        "UPDATE accounts SET extension = :ext WHERE accountID = :id";
+    auto prepUpdate = [](soci::statement& st_update, Fields const& data) {
+        st_update.exchange(soci::use(data.mExtension)),
+            st_update.exchange(soci::use(data.mAccountID));
+    };
+
+    auto postUpdate = [](long long const affected_rows, Fields const& data) {
+        if (affected_rows != 1)
+        {
+            throw std::runtime_error(fmt::format(
+                "{}: updating account with account ID {} affected {} row(s) ",
+                __func__, data.mAccountID, affected_rows));
+        }
+    };
+
+    size_t numUpdated = selectUpdateMap<Fields>(
+        *this, selectStr, makeFields, updateStr, prepUpdate, postUpdate);
+
+    CLOG_INFO(Database,
+              "{}: updated {} records(s) with liabilities in {} table",
+              __func__, numUpdated, tableStr);
+}
+
+void
+Database::copyIndividualTrustLineExtensionFieldsToOpaqueXDR()
+{
+    std::string const tableStr = "trustlines";
+
+    CLOG_INFO(Database, "{}: updating extension schema for {}", __func__,
+              tableStr);
+
+    // <accountID, issuer_id, asset_id, extension>
+    struct Fields
+    {
+        std::string mAccountID;
+        std::string mIssuerID;
+        std::string mAssetID;
+        std::string mExtension;
+    };
+
+    std::string const fieldsStr = "accountid, issuer, assetcode";
+    std::string const selectStr = getOldLiabilitySelect(tableStr, fieldsStr);
+    auto makeFields = [](soci::row const& row) {
+        TrustLineEntry::_ext_t extension;
+        // getOldLiabilitySelect() places the buying and selling extension
+        // column names after the three key fields in the SQL select string.
+        extension.v(1);
+        extension.v1().liabilities.buying = row.get<long long>(3);
+        extension.v1().liabilities.selling = row.get<long long>(4);
+        return Fields{row.get<std::string>(0), row.get<std::string>(1),
+                      row.get<std::string>(2),
+                      decoder::encode_b64(xdr::xdr_to_opaque(extension))};
+    };
+
+    std::string const updateStr =
+        "UPDATE trustlines SET extension = :ext WHERE accountID = :id "
+        "AND issuer = :issuer_id AND assetcode = :asset_id";
+    auto prepUpdate = [](soci::statement& st_update, Fields const& data) {
+        st_update.exchange(soci::use(data.mExtension));
+        st_update.exchange(soci::use(data.mAccountID));
+        st_update.exchange(soci::use(data.mIssuerID));
+        st_update.exchange(soci::use(data.mAssetID));
+    };
+
+    auto postUpdate = [](long long const affected_rows, Fields const& data) {
+        if (affected_rows != 1)
+        {
+            throw std::runtime_error(fmt::format(
+                "{}: updating trustline with account ID {}, issuer {}, and "
+                "asset {} affected {} row(s)",
+                __func__, data.mAccountID, data.mIssuerID, data.mAssetID,
+                affected_rows));
+        }
+    };
+
+    size_t numUpdated = selectUpdateMap<Fields>(
+        *this, selectStr, makeFields, updateStr, prepUpdate, postUpdate);
+
+    CLOG_INFO(Database,
+              "{}: updated {} records(s) with liabilities in {} table",
+              __func__, numUpdated, tableStr);
 }
 
 void
@@ -431,24 +593,6 @@ Database::initialize()
     // normally you do not want to touch this section as
     // schema updates are done in applySchemaUpgrade
 
-    if (isSqlite() && mApp.getConfig().DATABASE.value != "sqlite3://:memory:")
-    {
-        // When we're in non-memory (i.e. "disk") mode of SQLite we want to bump
-        // up the page size to 64k (the maximum supported). On fast SSDs / NVMe
-        // this actually is a slight speed-loss, but it's a significant win on
-        // slow disks (spinning platters, low-IOPS EBS, etc.)
-        //
-        // To do this we need to disable journalling, adjust the page_size, then
-        // vacuum and re-enable journalling. NB: WAL mode is _ignored_ in memory
-        // mode, so it's important that this code not run in memory mode, it'll
-        // disable all journalling and silently _not_ re-enable it.
-
-        mSession << "PRAGMA journal_mode = OFF";
-        mSession << "PRAGMA page_size = 65536";
-        mSession << "VACUUM";
-        mSession << "PRAGMA journal_mode = WAL";
-    }
-
     // only time this section should be modified is when
     // consolidating changes found in applySchemaUpgrade here
     Upgrades::dropAll(*this);
@@ -458,6 +602,7 @@ Database::initialize()
         mApp.getLedgerTxnRoot().dropOffers();
         mApp.getLedgerTxnRoot().dropTrustLines();
         mApp.getLedgerTxnRoot().dropData();
+        mApp.getLedgerTxnRoot().dropClaimableBalances();
     }
     OverlayManager::dropAll(*this);
     PersistentState::dropAll(*this);
@@ -468,10 +613,11 @@ Database::initialize()
     HerderPersistence::dropAll(*this);
     BanManager::dropAll(*this);
     putSchemaVersion(MIN_SCHEMA_VERSION);
+    mApp.getHerderPersistence().createQuorumTrackingTable(mSession);
 
-    LOG(INFO) << "* ";
-    LOG(INFO) << "* The database has been initialized";
-    LOG(INFO) << "* ";
+    LOG_INFO(DEFAULT_LOG, "* ");
+    LOG_INFO(DEFAULT_LOG, "* The database has been initialized");
+    LOG_INFO(DEFAULT_LOG, "* ");
 }
 
 soci::session&
@@ -495,12 +641,12 @@ Database::getPool()
             throw std::runtime_error(s);
         }
         size_t n = std::thread::hardware_concurrency();
-        LOG(INFO) << "Establishing " << n << "-entry connection pool to: "
-                  << removePasswordFromConnectionString(c.value);
+        LOG_INFO(DEFAULT_LOG, "Establishing {}-entry connection pool to: {}", n,
+                 removePasswordFromConnectionString(c.value));
         mPool = std::make_unique<soci::connection_pool>(n);
         for (size_t i = 0; i < n; ++i)
         {
-            LOG(DEBUG) << "Opening pool entry " << i;
+            LOG_DEBUG(DEFAULT_LOG, "Opening pool entry {}", i);
             soci::session& sess = mPool->at(i);
             sess.open(c.value);
             DatabaseConfigureSessionOp op(sess);
@@ -529,21 +675,21 @@ class SQLLogContext : NonCopyable
         std::string captured = mCapture.str();
         std::istringstream rd(captured);
         std::string buf;
-        CLOG(INFO, "Database") << "";
-        CLOG(INFO, "Database") << "";
-        CLOG(INFO, "Database") << "[SQL] -----------------------";
-        CLOG(INFO, "Database") << "[SQL] begin capture: " << mName;
-        CLOG(INFO, "Database") << "[SQL] -----------------------";
+        CLOG_INFO(Database, "");
+        CLOG_INFO(Database, "");
+        CLOG_INFO(Database, "[SQL] -----------------------");
+        CLOG_INFO(Database, "[SQL] begin capture: {}", mName);
+        CLOG_INFO(Database, "[SQL] -----------------------");
         while (std::getline(rd, buf))
         {
-            CLOG(INFO, "Database") << "[SQL:" << mName << "] " << buf;
+            CLOG_INFO(Database, "[SQL:{}] {}", mName, buf);
             buf.clear();
         }
-        CLOG(INFO, "Database") << "[SQL] -----------------------";
-        CLOG(INFO, "Database") << "[SQL] end capture: " << mName;
-        CLOG(INFO, "Database") << "[SQL] -----------------------";
-        CLOG(INFO, "Database") << "";
-        CLOG(INFO, "Database") << "";
+        CLOG_INFO(Database, "[SQL] -----------------------");
+        CLOG_INFO(Database, "[SQL] end capture: {}", mName);
+        CLOG_INFO(Database, "[SQL] -----------------------");
+        CLOG_INFO(Database, "");
+        CLOG_INFO(Database, "");
     }
 };
 
@@ -572,89 +718,5 @@ std::shared_ptr<SQLLogContext>
 Database::captureAndLogSQL(std::string contextName)
 {
     return make_shared<SQLLogContext>(contextName, mSession);
-}
-
-medida::Meter&
-Database::getQueryMeter()
-{
-    return mQueryMeter;
-}
-
-std::chrono::nanoseconds
-Database::totalQueryTime() const
-{
-    std::vector<std::string> qtypes = {"insert", "delete", "select", "update"};
-    std::chrono::nanoseconds nsq(0);
-    for (auto const& q : qtypes)
-    {
-        for (auto const& e : mEntityTypes)
-        {
-            auto& timer = mApp.getMetrics().NewTimer({"database", q, e});
-            uint64_t sumns = static_cast<uint64_t>(
-                timer.sum() *
-                static_cast<double>(timer.duration_unit().count()));
-            nsq += std::chrono::nanoseconds(sumns);
-        }
-    }
-    return nsq;
-}
-
-void
-Database::excludeTime(std::chrono::nanoseconds const& queryTime,
-                      std::chrono::nanoseconds const& totalTime)
-{
-    mExcludedQueryTime += queryTime;
-    mExcludedTotalTime += totalTime;
-}
-
-uint32_t
-Database::recentIdleDbPercent()
-{
-    std::chrono::nanoseconds query = totalQueryTime();
-    query -= mLastIdleQueryTime;
-    query -= mExcludedQueryTime;
-
-    std::chrono::nanoseconds total = mApp.getClock().now() - mLastIdleTotalTime;
-    total -= mExcludedTotalTime;
-
-    if (total == std::chrono::nanoseconds::zero())
-    {
-        return 100;
-    }
-
-    uint32_t queryPercent =
-        static_cast<uint32_t>((100 * query.count()) / total.count());
-    uint32_t idlePercent = 100 - queryPercent;
-    if (idlePercent > 100)
-    {
-        // This should never happen, but clocks are not perfectly well behaved.
-        CLOG(WARNING, "Database") << "DB idle percent (" << idlePercent
-                                  << ") over 100, limiting to 100";
-        idlePercent = 100;
-    }
-
-    CLOG(DEBUG, "Database") << "Estimated DB idle: " << idlePercent << "%"
-                            << " (query=" << query.count() << "ns"
-                            << ", total=" << total.count() << "ns)";
-
-    mLastIdleQueryTime = totalQueryTime();
-    mLastIdleTotalTime = mApp.getClock().now();
-    mExcludedQueryTime = std::chrono::nanoseconds(0);
-    mExcludedTotalTime = std::chrono::nanoseconds(0);
-    return idlePercent;
-}
-
-DBTimeExcluder::DBTimeExcluder(Application& app)
-    : mApp(app)
-    , mStartQueryTime(app.getDatabase().totalQueryTime())
-    , mStartTotalTime(app.getClock().now())
-{
-}
-
-DBTimeExcluder::~DBTimeExcluder()
-{
-    auto deltaQ = mApp.getDatabase().totalQueryTime() - mStartQueryTime;
-    auto deltaT = mApp.getClock().now() - mStartTotalTime;
-    mApp.getDatabase().excludeTime(deltaQ, deltaT);
 }
 }

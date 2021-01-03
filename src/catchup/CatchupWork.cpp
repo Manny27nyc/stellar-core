@@ -22,13 +22,14 @@
 #include "ledger/LedgerManager.h"
 #include "main/Application.h"
 #include "util/Logging.h"
-#include <lib/util/format.h>
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
 
-uint32_t const CatchupWork::PUBLISH_QUEUE_UNBLOCK_APPLICATION = 16;
-uint32_t const CatchupWork::PUBLISH_QUEUE_MAX_SIZE = 32;
+uint32_t const CatchupWork::PUBLISH_QUEUE_UNBLOCK_APPLICATION = 8;
+uint32_t const CatchupWork::PUBLISH_QUEUE_MAX_SIZE = 16;
 
 CatchupWork::CatchupWork(Application& app,
                          CatchupConfiguration catchupConfiguration,
@@ -42,8 +43,8 @@ CatchupWork::CatchupWork(Application& app,
 {
     if (mArchive)
     {
-        CLOG(INFO, "History")
-            << "CatchupWork: selected archive " << mArchive->getName();
+        CLOG_INFO(History, "CatchupWork: selected archive {}",
+                  mArchive->getName());
     }
 }
 
@@ -78,6 +79,7 @@ CatchupWork::getStatus() const
 void
 CatchupWork::doReset()
 {
+    ZoneScoped;
     mBucketsAppliedEmitted = false;
     mTransactionsVerifyEmitted = false;
     mBuckets.clear();
@@ -111,6 +113,7 @@ void
 CatchupWork::downloadVerifyLedgerChain(CatchupRange const& catchupRange,
                                        LedgerNumHashPair rangeEnd)
 {
+    ZoneScoped;
     auto verifyRange = catchupRange.getFullRangeIncludingBucketApply();
     assert(verifyRange.mCount != 0);
     auto checkpointRange =
@@ -118,8 +121,12 @@ CatchupWork::downloadVerifyLedgerChain(CatchupRange const& catchupRange,
     auto getLedgers = std::make_shared<BatchDownloadWork>(
         mApp, checkpointRange, HISTORY_FILE_TYPE_LEDGER, *mDownloadDir,
         mArchive);
+    mRangeEndPromise = std::promise<LedgerNumHashPair>();
+    mRangeEndFuture = mRangeEndPromise.get_future().share();
+    mRangeEndPromise.set_value(rangeEnd);
     mVerifyLedgers = std::make_shared<VerifyLedgerChainWork>(
-        mApp, *mDownloadDir, verifyRange, mLastClosedLedgerHashPair, rangeEnd);
+        mApp, *mDownloadDir, verifyRange, mLastClosedLedgerHashPair,
+        mRangeEndFuture);
 
     std::vector<std::shared_ptr<BasicWork>> seq{getLedgers, mVerifyLedgers};
     mDownloadVerifyLedgersSeq =
@@ -130,6 +137,7 @@ CatchupWork::downloadVerifyLedgerChain(CatchupRange const& catchupRange,
 void
 CatchupWork::downloadVerifyTxResults(CatchupRange const& catchupRange)
 {
+    ZoneScoped;
     auto range = catchupRange.getReplayRange();
     auto checkpointRange = CheckpointRange{range, mApp.getHistoryManager()};
     mVerifyTxResults = std::make_shared<DownloadVerifyTxResultsWork>(
@@ -146,6 +154,7 @@ CatchupWork::alreadyHaveBucketsHistoryArchiveState(uint32_t atCheckpoint) const
 WorkSeqPtr
 CatchupWork::downloadApplyBuckets()
 {
+    ZoneScoped;
     auto const& has = mGetBucketStateWork->getHistoryArchiveState();
     std::vector<std::string> hashes = has.differingBuckets(mLocalState);
     auto getBuckets = std::make_shared<DownloadBucketsWork>(
@@ -166,6 +175,12 @@ CatchupWork::assertBucketState()
 
     // Consistency check: remote state and mVerifiedLedgerRangeStart should
     // point to the same ledger and the same BucketList.
+    if (has.currentLedger != mVerifiedLedgerRangeStart.header.ledgerSeq)
+    {
+        CLOG_ERROR(History, "Caught up to wrong ledger: wanted {}, got {}",
+                   has.currentLedger,
+                   mVerifiedLedgerRangeStart.header.ledgerSeq);
+    }
     assert(has.currentLedger == mVerifiedLedgerRangeStart.header.ledgerSeq);
     assert(has.getBucketListHash() ==
            mVerifiedLedgerRangeStart.header.bucketListHash);
@@ -187,6 +202,7 @@ CatchupWork::assertBucketState()
 void
 CatchupWork::downloadApplyTransactions(CatchupRange const& catchupRange)
 {
+    ZoneScoped;
     auto waitForPublish = mCatchupConfiguration.offline();
     auto range = catchupRange.getReplayRange();
     mTransactionsVerifyApplySeq = std::make_shared<DownloadApplyTxsWork>(
@@ -196,18 +212,18 @@ CatchupWork::downloadApplyTransactions(CatchupRange const& catchupRange)
 BasicWork::State
 CatchupWork::runCatchupStep()
 {
+    ZoneScoped;
     // Step 1: Get history archive state
     if (!mGetHistoryArchiveStateWork)
     {
         auto toLedger = mCatchupConfiguration.toLedger() == 0
                             ? "CURRENT"
                             : std::to_string(mCatchupConfiguration.toLedger());
-        CLOG(INFO, "History")
-            << "Starting catchup with configuration:\n"
-            << "  lastClosedLedger: "
-            << mApp.getLedgerManager().getLastClosedLedgerNum() << "\n"
-            << "  toLedger: " << toLedger << "\n"
-            << "  count: " << mCatchupConfiguration.count();
+        CLOG_INFO(History,
+                  "Starting catchup with configuration:\n  lastClosedLedger: "
+                  "{}\n  toLedger: {}\n  count: {}",
+                  mApp.getLedgerManager().getLastClosedLedgerNum(), toLedger,
+                  mCatchupConfiguration.count());
 
         auto toCheckpoint =
             mCatchupConfiguration.toLedger() == CatchupConfiguration::CURRENT
@@ -225,30 +241,42 @@ CatchupWork::runCatchupStep()
     }
 
     auto const& has = mGetHistoryArchiveStateWork->getHistoryArchiveState();
+    // If the HAS is a newer version and contains networkPassphrase,
+    // we should make sure that it matches the config's networkPassphrase.
+    if (!has.networkPassphrase.empty() &&
+        has.networkPassphrase != mApp.getConfig().NETWORK_PASSPHRASE)
+    {
+        CLOG_ERROR(History, "The network passphrase of the "
+                            "application does not match that of the "
+                            "history archive state");
+        return State::WORK_FAILURE;
+    }
+
     // Step 2: Compare local and remote states
     if (!hasAnyLedgersToCatchupTo())
     {
-        CLOG(INFO, "History") << "*";
-        CLOG(INFO, "History")
-            << "* Target ledger " << has.currentLedger
-            << " is not newer than last closed ledger "
-            << mLastClosedLedgerHashPair.first << " - nothing to do";
+        CLOG_INFO(History, "*");
+        CLOG_INFO(
+            History,
+            "* Target ledger {} is not newer than last closed ledger {} - "
+            "nothing to do",
+            has.currentLedger, mLastClosedLedgerHashPair.first);
 
         if (mCatchupConfiguration.toLedger() == CatchupConfiguration::CURRENT)
         {
-            CLOG(INFO, "History")
-                << "* Wait until next checkpoint before retrying";
+            CLOG_INFO(History, "* Wait until next checkpoint before retrying");
         }
         else
         {
-            CLOG(INFO, "History") << "* If you really want to catchup to "
-                                  << mCatchupConfiguration.toLedger()
-                                  << " run stellar-core new-db";
+            CLOG_INFO(
+                History,
+                "* If you really want to catchup to {} run stellar-core new-db",
+                mCatchupConfiguration.toLedger());
         }
 
-        CLOG(INFO, "History") << "*";
+        CLOG_INFO(History, "*");
 
-        CLOG(ERROR, "History") << "Nothing to catchup to ";
+        CLOG_ERROR(History, "Nothing to catchup to ");
 
         return State::WORK_FAILURE;
     }
@@ -355,7 +383,7 @@ CatchupWork::runCatchupStep()
         if (mDownloadVerifyLedgersSeq->getState() == State::WORK_SUCCESS)
         {
             mVerifiedLedgerRangeStart =
-                mVerifyLedgers->getVerifiedLedgerRangeStart();
+                mVerifyLedgers->getMaxVerifiedLedgerOfMinCheckpoint();
             if (catchupRange.applyBuckets() && !mBucketsAppliedEmitted)
             {
                 assertBucketState();
@@ -402,6 +430,7 @@ CatchupWork::runCatchupStep()
 BasicWork::State
 CatchupWork::doWork()
 {
+    ZoneScoped;
     auto nextState = runCatchupStep();
     auto& cm = mApp.getCatchupManager();
 
@@ -417,14 +446,14 @@ CatchupWork::doWork()
 void
 CatchupWork::onFailureRaise()
 {
-    CLOG(WARNING, "History") << "Catchup failed";
+    CLOG_WARNING(History, "Catchup failed");
     Work::onFailureRaise();
 }
 
 void
 CatchupWork::onSuccess()
 {
-    CLOG(INFO, "History") << "Catchup finished";
+    CLOG_INFO(History, "Catchup finished");
     Work::onSuccess();
 }
 }

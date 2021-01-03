@@ -48,12 +48,14 @@ class BucketManagerImpl : public BucketManager
     medida::Counter& mSharedBucketsSize;
     MergeCounters mMergeCounters;
 
+    bool const mDeleteEntireBucketDirInDtor;
+
     // Records bucket-merges that are currently _live_ in some FutureBucket, in
     // the sense of either running, or finished (with or without the
     // FutureBucket being resolved). Entries in this map will be cleared when
     // the FutureBucket is _cleared_ (typically when the owning BucketList level
     // is committed).
-    std::unordered_map<MergeKey, std::shared_future<std::shared_ptr<Bucket>>>
+    UnorderedMap<MergeKey, std::shared_future<std::shared_ptr<Bucket>>>
         mLiveFutures;
 
     // Records bucket-merges that are _finished_, i.e. have been adopted as
@@ -63,8 +65,11 @@ class BucketManagerImpl : public BucketManager
     // alive. Needs to be queried and updated on mSharedBuckets GC events.
     BucketMergeMap mFinishedMerges;
 
+    std::atomic<bool> mIsShutdown{false};
+
     void cleanupStaleFiles();
-    void cleanDir();
+    void deleteTmpDirAndUnlockBucketDir();
+    void deleteEntireBucketDir();
     bool renameBucket(std::string const& src, std::string const& dst);
 
 #ifdef BUILD_TESTS
@@ -129,6 +134,8 @@ class BucketManagerImpl : public BucketManager
     void assumeState(HistoryArchiveState const& has,
                      uint32_t maxProtocolVersion) override;
     void shutdown() override;
+
+    bool isShutdown() const override;
 };
 
 #define SKIP_1 50

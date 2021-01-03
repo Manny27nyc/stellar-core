@@ -8,6 +8,7 @@
 #include "historywork/Progress.h"
 #include "main/Application.h"
 #include "util/XDRStream.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -39,6 +40,7 @@ WriteSnapshotWork::onRun()
         {
             return;
         }
+        ZoneScoped;
 
         auto snap = self->mSnapshot;
         bool success = true;
@@ -60,8 +62,7 @@ WriteSnapshotWork::onRun()
                     self->wakeUp();
                 }
             },
-            {VirtualClock::ExecutionCategory::Type::NORMAL_EVENT,
-             "WriteSnapshotWork: finish"});
+            "WriteSnapshotWork: finish");
     };
 
     // Throw the work over to a worker thread if we can use DB pools,
@@ -73,9 +74,7 @@ WriteSnapshotWork::onRun()
     }
     else
     {
-        mApp.postOnMainThread(
-            work, {VirtualClock::ExecutionCategory::Type::NORMAL_EVENT,
-                   "WriteSnapshotWork: start"});
+        mApp.postOnMainThread(work, "WriteSnapshotWork: start");
     }
     return State::WORK_WAITING;
 }

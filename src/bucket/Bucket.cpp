@@ -17,7 +17,6 @@
 #include "crypto/Random.h"
 #include "crypto/SHA.h"
 #include "database/Database.h"
-#include "lib/util/format.h"
 #include "main/Application.h"
 #include "medida/timer.h"
 #include "util/Fs.h"
@@ -25,7 +24,9 @@
 #include "util/TmpDir.h"
 #include "util/XDRStream.h"
 #include "xdrpp/message.h"
+#include <Tracy.hpp>
 #include <cassert>
+#include <fmt/format.h>
 #include <future>
 
 namespace stellar
@@ -37,8 +38,8 @@ Bucket::Bucket(std::string const& filename, Hash const& hash)
     assert(filename.empty() || fs::exists(filename));
     if (!filename.empty())
     {
-        CLOG(TRACE, "Bucket")
-            << "Bucket::Bucket() created, file exists : " << mFilename;
+        CLOG_TRACE(Bucket, "Bucket::Bucket() created, file exists : {}",
+                   mFilename);
         mSize = fs::size(filename);
     }
 }
@@ -84,14 +85,15 @@ Bucket::containsBucketIdentity(BucketEntry const& id) const
 void
 Bucket::apply(Application& app) const
 {
+    ZoneScoped;
     BucketApplicator applicator(app, app.getConfig().LEDGER_PROTOCOL_VERSION,
                                 shared_from_this());
-    BucketApplicator::Counters counters(std::chrono::system_clock::now());
+    BucketApplicator::Counters counters(app.getClock().now());
     while (applicator)
     {
         applicator.advance(counters);
     }
-    counters.logInfo("direct", 0, std::chrono::system_clock::now());
+    counters.logInfo("direct", 0, app.getClock().now());
 }
 
 std::vector<BucketEntry>
@@ -140,6 +142,7 @@ Bucket::fresh(BucketManager& bucketManager, uint32_t protocolVersion,
               std::vector<LedgerKey> const& deadEntries, bool countMergeEvents,
               asio::io_context& ctx, bool doFsync)
 {
+    ZoneScoped;
     // When building fresh buckets after protocol version 10 (i.e. version
     // 11-or-after) we differentiate INITENTRY from LIVEENTRY. In older
     // protocols, for compatibility sake, we mark both cases as LIVEENTRY.
@@ -186,7 +189,7 @@ countShadowedEntryType(MergeCounters& mc, BucketEntry const& e)
     }
 }
 
-inline void
+void
 Bucket::checkProtocolLegality(BucketEntry const& entry,
                               uint32_t protocolVersion)
 {
@@ -370,8 +373,8 @@ calculateMergeProtocolVersion(
         }
     }
 
-    CLOG(TRACE, "Bucket") << "Bucket merge protocolVersion=" << protocolVersion
-                          << ", maxProtocolVersion=" << maxProtocolVersion;
+    CLOG_TRACE(Bucket, "Bucket merge protocolVersion={}, maxProtocolVersion={}",
+               protocolVersion, maxProtocolVersion);
 
     if (protocolVersion > maxProtocolVersion)
     {
@@ -592,6 +595,7 @@ Bucket::merge(BucketManager& bucketManager, uint32_t maxProtocolVersion,
               bool keepDeadEntries, bool countMergeEvents,
               asio::io_context& ctx, bool doFsync)
 {
+    ZoneScoped;
     // This is the key operation in the scheme: merging two (read-only)
     // buckets together into a new 3rd bucket, while calculating its hash,
     // in a single pass.
@@ -618,8 +622,24 @@ Bucket::merge(BucketManager& bucketManager, uint32_t maxProtocolVersion,
                              mc, ctx, doFsync);
 
     BucketEntryIdCmp cmp;
+    size_t iter = 0;
+
     while (oi || ni)
     {
+        // Check if the merge should be stopped every few entries
+        if (++iter >= 1000)
+        {
+            iter = 0;
+            if (bucketManager.isShutdown())
+            {
+                // Stop merging, as BucketManager is now shutdown
+                // This is safe as temp file has not been adopted yet,
+                // so it will be removed with the tmp dir
+                throw std::runtime_error(
+                    "Incomplete bucket merge due to BucketManager shutdown");
+            }
+        }
+
         if (!mergeCasesWithDefaultAcceptance(cmp, mc, oi, ni, out,
                                              shadowIterators, protocolVersion,
                                              keepShadowedLifecycleEntries))

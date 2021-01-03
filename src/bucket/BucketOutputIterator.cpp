@@ -6,6 +6,7 @@
 #include "bucket/Bucket.h"
 #include "bucket/BucketManager.h"
 #include "crypto/Random.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -15,6 +16,7 @@ namespace
 std::string
 randomBucketName(std::string const& tmpDir)
 {
+    ZoneScoped;
     for (;;)
     {
         std::string name =
@@ -40,13 +42,13 @@ BucketOutputIterator::BucketOutputIterator(std::string const& tmpDir,
     : mFilename(randomBucketName(tmpDir))
     , mOut(ctx, doFsync)
     , mBuf(nullptr)
-    , mHasher(SHA256::create())
     , mKeepDeadEntries(keepDeadEntries)
     , mMeta(meta)
     , mMergeCounters(mc)
 {
-    CLOG(TRACE, "Bucket") << "BucketOutputIterator opening file to write: "
-                          << mFilename;
+    ZoneScoped;
+    CLOG_TRACE(Bucket, "BucketOutputIterator opening file to write: {}",
+               mFilename);
     // Will throw if unable to open the file
     mOut.open(mFilename);
 
@@ -64,6 +66,7 @@ BucketOutputIterator::BucketOutputIterator(std::string const& tmpDir,
 void
 BucketOutputIterator::put(BucketEntry const& e)
 {
+    ZoneScoped;
     Bucket::checkProtocolLegality(e, mMeta.ledgerVersion);
     if (e.type() == METAENTRY)
     {
@@ -92,7 +95,7 @@ BucketOutputIterator::put(BucketEntry const& e)
         if (mCmp(*mBuf, e))
         {
             ++mMergeCounters.mOutputIteratorActualWrites;
-            mOut.writeOne(*mBuf, mHasher.get(), &mBytesPut);
+            mOut.writeOne(*mBuf, &mHasher, &mBytesPut);
             mObjectsPut++;
         }
     }
@@ -110,9 +113,10 @@ std::shared_ptr<Bucket>
 BucketOutputIterator::getBucket(BucketManager& bucketManager,
                                 MergeKey* mergeKey)
 {
+    ZoneScoped;
     if (mBuf)
     {
-        mOut.writeOne(*mBuf, mHasher.get(), &mBytesPut);
+        mOut.writeOne(*mBuf, &mHasher, &mBytesPut);
         mObjectsPut++;
         mBuf.reset();
     }
@@ -122,7 +126,7 @@ BucketOutputIterator::getBucket(BucketManager& bucketManager,
     {
         assert(mObjectsPut == 0);
         assert(mBytesPut == 0);
-        CLOG(DEBUG, "Bucket") << "Deleting empty bucket file " << mFilename;
+        CLOG_DEBUG(Bucket, "Deleting empty bucket file {}", mFilename);
         std::remove(mFilename.c_str());
         if (mergeKey)
         {
@@ -130,7 +134,7 @@ BucketOutputIterator::getBucket(BucketManager& bucketManager,
         }
         return std::make_shared<Bucket>();
     }
-    return bucketManager.adoptFileAsBucket(mFilename, mHasher->finish(),
+    return bucketManager.adoptFileAsBucket(mFilename, mHasher.finish(),
                                            mObjectsPut, mBytesPut, mergeKey);
 }
 }

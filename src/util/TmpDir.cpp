@@ -9,12 +9,14 @@
 #include "main/Config.h"
 #include "util/Fs.h"
 #include "util/Logging.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
 
 TmpDir::TmpDir(std::string const& prefix)
 {
+    ZoneScoped;
     size_t attempts = 0;
     for (;;)
     {
@@ -44,6 +46,7 @@ TmpDir::getName() const
 
 TmpDir::~TmpDir()
 {
+    ZoneScoped;
     if (!mPath)
     {
         return;
@@ -54,13 +57,13 @@ TmpDir::~TmpDir()
         if (fs::exists(*mPath))
         {
             fs::deltree(*mPath);
-            LOG(DEBUG) << "TmpDir deleted: " << *mPath;
+            LOG_DEBUG(DEFAULT_LOG, "TmpDir deleted: {}", *mPath);
         }
     }
     catch (std::runtime_error& e)
     {
-        LOG(ERROR) << "Failed to delete TmpDir: " << *mPath
-                   << ", because: " << e.what();
+        LOG_ERROR(DEFAULT_LOG, "Failed to delete TmpDir: {}, because: {}",
+                  *mPath, e.what());
     }
 
     mPath.reset();
@@ -80,9 +83,10 @@ TmpDirManager::~TmpDirManager()
 void
 TmpDirManager::clean()
 {
+    ZoneScoped;
     if (fs::exists(mRoot))
     {
-        LOG(DEBUG) << "TmpDirManager cleaning: " << mRoot;
+        LOG_DEBUG(DEFAULT_LOG, "TmpDirManager cleaning: {}", mRoot);
         fs::deltree(mRoot);
     }
 }

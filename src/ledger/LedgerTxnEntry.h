@@ -4,6 +4,7 @@
 // under the Apache License, Version 2.0. See the COPYING file at the root
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
+#include "ledger/InternalLedgerEntry.h"
 #include "xdr/Stellar-ledger-entries.h"
 #include <memory>
 
@@ -51,6 +52,9 @@ class LedgerTxnEntry
     LedgerEntry& current();
     LedgerEntry const& current() const;
 
+    InternalLedgerEntry& currentGeneralized();
+    InternalLedgerEntry const& currentGeneralized() const;
+
     void deactivate();
 
     void erase();
@@ -58,7 +62,7 @@ class LedgerTxnEntry
     void swap(LedgerTxnEntry& other);
 
     static std::shared_ptr<Impl> makeSharedImpl(AbstractLedgerTxn& ltx,
-                                                LedgerEntry& current);
+                                                InternalLedgerEntry& current);
 };
 
 class ConstLedgerTxnEntry
@@ -91,12 +95,14 @@ class ConstLedgerTxnEntry
 
     LedgerEntry const& current() const;
 
+    InternalLedgerEntry const& currentGeneralized() const;
+
     void deactivate();
 
     void swap(ConstLedgerTxnEntry& other);
 
-    static std::shared_ptr<Impl> makeSharedImpl(AbstractLedgerTxn& ltx,
-                                                LedgerEntry const& current);
+    static std::shared_ptr<Impl>
+    makeSharedImpl(AbstractLedgerTxn& ltx, InternalLedgerEntry const& current);
 };
 
 std::shared_ptr<EntryImplBase>

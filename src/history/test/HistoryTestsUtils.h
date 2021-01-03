@@ -7,6 +7,7 @@
 #include "bucket/BucketList.h"
 #include "catchup/VerifyLedgerChainWork.h"
 #include "crypto/Hex.h"
+#include "herder/HerderImpl.h"
 #include "herder/LedgerCloseData.h"
 #include "history/FileTransferInfo.h"
 #include "history/HistoryArchive.h"
@@ -151,22 +152,21 @@ class TestLedgerChainGenerator
 struct CatchupMetrics
 {
     uint64_t mHistoryArchiveStatesDownloaded;
-    uint64_t mLedgersDownloaded;
+    uint64_t mCheckpointsDownloaded;
     uint64_t mLedgersVerified;
     uint64_t mLedgerChainsVerificationFailed;
     uint64_t mBucketsDownloaded;
     uint64_t mBucketsApplied;
-    uint64_t mTransactionsDownloaded;
-    uint64_t mTransactionsApplied;
+    uint64_t mTxSetsDownloaded;
+    uint64_t mTxSetsApplied;
 
     CatchupMetrics();
 
     CatchupMetrics(uint64_t historyArchiveStatesDownloaded,
-                   uint64_t ledgersDownloaded, uint64_t ledgersVerified,
+                   uint64_t checkpointsDownloaded, uint64_t ledgersVerified,
                    uint64_t ledgerChainsVerificationFailed,
                    uint64_t bucketsDownloaded, uint64_t bucketsApplied,
-                   uint64_t transactionsDownloaded,
-                   uint64_t transactionsApplied);
+                   uint64_t txSetsDownloaded, uint64_t txSetsApplied);
 
     friend CatchupMetrics operator-(CatchupMetrics const& x,
                                     CatchupMetrics const& y);
@@ -175,22 +175,22 @@ struct CatchupMetrics
 struct CatchupPerformedWork
 {
     uint64_t mHistoryArchiveStatesDownloaded;
-    uint64_t mLedgersDownloaded;
+    uint64_t mCheckpointsDownloaded;
     uint64_t mLedgersVerified;
     uint64_t mLedgerChainsVerificationFailed;
     bool mBucketsDownloaded;
     bool mBucketsApplied;
-    uint64_t mTransactionsDownloaded;
-    uint64_t mTransactionsApplied;
+    uint64_t mTxSetsDownloaded;
+    uint64_t mTxSetsApplied;
 
     CatchupPerformedWork(CatchupMetrics const& metrics);
 
     CatchupPerformedWork(uint64_t historyArchiveStatesDownloaded,
-                         uint64_t ledgersDownloaded, uint64_t ledgersVerified,
+                         uint64_t checkpointsDownloaded,
+                         uint64_t ledgersVerified,
                          uint64_t ledgerChainsVerificationFailed,
                          bool bucketsDownloaded, bool bucketsApplied,
-                         uint64_t transactionsDownloaded,
-                         uint64_t transactionsApplied);
+                         uint64_t txSetsDownloaded, uint64_t txSetsApplied);
 
     friend bool operator==(CatchupPerformedWork const& x,
                            CatchupPerformedWork const& y);
@@ -272,6 +272,9 @@ class CatchupSimulation
     void ensureOnlineCatchupPossible(uint32_t targetLedger,
                                      uint32_t bufferLedgers = 0);
 
+    std::vector<LedgerNumHashPair> getAllPublishedCheckpoints() const;
+    LedgerNumHashPair getLastPublishedCheckpoint() const;
+
     Application::pointer createCatchupApplication(uint32_t count,
                                                   Config::TestDbMode dbMode,
                                                   std::string const& appName,
@@ -280,7 +283,11 @@ class CatchupSimulation
                         bool extraValidation = false);
     bool catchupOnline(Application::pointer app, uint32_t initLedger,
                        uint32_t bufferLedgers = 0, uint32_t gapLedger = 0,
-                       int32_t numGapLedgers = 1);
+                       int32_t numGapLedgers = 1,
+                       std::vector<uint32_t> const& ledgersToInject = {});
+
+    // this method externalizes through herder
+    void externalizeLedger(HerderImpl& herder, uint32_t ledger);
 
     void crankUntil(Application::pointer app,
                     std::function<bool()> const& predicate,

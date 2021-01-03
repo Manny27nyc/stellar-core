@@ -46,7 +46,6 @@
 namespace stellar
 {
 
-class LoadManager;
 class PeerAuth;
 class PeerBareAddress;
 class PeerManager;
@@ -61,9 +60,9 @@ class OverlayManager
     static void dropAll(Database& db);
 
     // Flush all FloodGate and ItemFetcher state for ledgers older than
-    // `ledger`.
-    // This is called by LedgerManager when a ledger closes.
-    virtual void ledgerClosed(uint32_t lastClosedledgerSeq) = 0;
+    // `ledgerSeq`.
+    // This is called by Herder when ledger `lclSeq` closes.
+    virtual void clearLedgersBelow(uint32_t ledgerSeq, uint32_t lclSeq) = 0;
 
     // Send a given message to all peers, via the FloodGate. This is called by
     // Herder.
@@ -166,9 +165,6 @@ class OverlayManager
 
     // Return the persistent p2p authentication-key cache.
     virtual PeerAuth& getPeerAuth() = 0;
-
-    // Return the persistent peer-load-accounting cache.
-    virtual LoadManager& getLoadManager() = 0;
 
     // Return the persistent peer manager
     virtual PeerManager& getPeerManager() = 0;

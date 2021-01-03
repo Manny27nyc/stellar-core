@@ -11,10 +11,12 @@
 #include "ledger/LedgerTxnEntry.h"
 #include "ledger/LedgerTxnHeader.h"
 #include "main/Application.h"
+#include "test/TestAccount.h"
 #include "test/TestExceptions.h"
 #include "test/TestUtils.h"
 #include "test/test.h"
 #include "transactions/OperationFrame.h"
+#include "transactions/SignatureUtils.h"
 #include "transactions/TransactionFrame.h"
 #include "transactions/TransactionSQL.h"
 #include "transactions/TransactionUtils.h"
@@ -114,15 +116,21 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
     // Increment ledgerSeq to simulate the behavior of closeLedger, which begins
     // by advancing the ledgerSeq.
     ++ltx.loadHeader().current().ledgerSeq;
+    auto ledgerVersion = ltx.loadHeader().current().ledgerVersion;
 
     bool check = false;
     TransactionResult checkResult;
     TransactionResultCode code;
     AccountEntry srcAccountBefore;
+
+    auto checkedTx = TransactionFrameBase::makeTransactionFromWire(
+        app.getNetworkID(), tx->getEnvelope());
+    bool checkedTxApplyRes = false;
     {
         LedgerTxn ltxFeeProc(ltx);
-        check = tx->checkValid(ltxFeeProc, 0);
-        checkResult = tx->getResult();
+        // use checkedTx here for validity check as to keep tx untouched
+        check = checkedTx->checkValid(ltxFeeProc, 0, 0, 0);
+        checkResult = checkedTx->getResult();
         REQUIRE((!check || checkResult.result.code() == txSUCCESS));
 
         // now, check what happens when simulating what happens during a ledger
@@ -132,6 +140,28 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
         // the same way)
         // * a valid tx can fail later
         code = checkResult.result.code();
+
+        // compute the same changes in parallel on checkedTx
+        {
+            LedgerTxn ltxCleanTx(ltxFeeProc);
+            auto baseFee = ltxCleanTx.loadHeader().current().baseFee;
+            if (code != txNO_ACCOUNT)
+            {
+                checkedTx->processFeeSeqNum(ltxCleanTx, baseFee);
+            }
+            // else, leave feeCharged as per checkValid
+            try
+            {
+                TransactionMeta cleanTm(2);
+                checkedTxApplyRes = checkedTx->apply(app, ltxCleanTx, cleanTm);
+            }
+            catch (...)
+            {
+                checkedTx->getResult().result.code(txINTERNAL_ERROR);
+            }
+            // do not commit this one
+        }
+
         if (code != txNO_ACCOUNT)
         {
             srcAccountBefore = loadAccount(ltxFeeProc, tx->getSourceID(), true)
@@ -141,18 +171,27 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
             // no account -> can't process the fee
             auto baseFee = ltxFeeProc.loadHeader().current().baseFee;
             tx->processFeeSeqNum(ltxFeeProc, baseFee);
-            uint32_t ledgerVersion =
-                ltxFeeProc.loadHeader().current().ledgerVersion;
+            // check that the recommended fee is correct, ignore the difference
+            // for later
+            if (ledgerVersion >= 11)
+            {
+                REQUIRE(checkResult.feeCharged >= tx->getResult().feeCharged);
+            }
+            // this is to ignore potential changes in feeCharged
+            // as `checkValid` returns an estimate
+            checkResult.feeCharged = tx->getResult().feeCharged;
 
             // verify that the fee got processed
             auto ltxDelta = ltxFeeProc.getDelta();
             REQUIRE(ltxDelta.entry.size() == 1);
             auto current = ltxDelta.entry.begin()->second.current;
             REQUIRE(current);
+            REQUIRE(current->type() == InternalLedgerEntryType::LEDGER_ENTRY);
             auto previous = ltxDelta.entry.begin()->second.previous;
             REQUIRE(previous);
-            auto currAcc = current->data.account();
-            auto prevAcc = previous->data.account();
+            REQUIRE(previous->type() == InternalLedgerEntryType::LEDGER_ENTRY);
+            auto currAcc = current->ledgerEntry().data.account();
+            auto prevAcc = previous->ledgerEntry().data.account();
             REQUIRE(prevAcc == srcAccountBefore);
             REQUIRE(currAcc.accountID == tx->getSourceID());
             REQUIRE(currAcc.balance < prevAcc.balance);
@@ -165,6 +204,12 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
                 currAcc.seqNum = prevAcc.seqNum;
             }
             REQUIRE(currAcc == prevAcc);
+        }
+        else
+        {
+            // this basically makes it that we ignore that field when we
+            // don't have an account
+            tx->getResult().feeCharged = checkResult.feeCharged;
         }
         ltxFeeProc.commit();
     }
@@ -181,6 +226,12 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
         {
             tx->getResult().result.code(txINTERNAL_ERROR);
         }
+
+        // check that both tx and cleanTx behave the same
+        REQUIRE(res == checkedTxApplyRes);
+        REQUIRE(tx->getEnvelope() == checkedTx->getEnvelope());
+        REQUIRE(tx->getResult() == checkedTx->getResult());
+
         REQUIRE((!res || tx->getResultCode() == txSUCCESS));
 
         if (!res || tx->getResultCode() != txSUCCESS)
@@ -224,7 +275,6 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
                 // do not perform the check if there was a failure before
                 // or during the sequence number processing
                 auto header = ltxTx.loadHeader();
-                auto ledgerVersion = header.current().ledgerVersion;
                 if (checkSeqNum && ledgerVersion >= 10 && !earlyFailure)
                 {
                     REQUIRE(srcAccountAfter.current().data.account().seqNum ==
@@ -247,15 +297,21 @@ applyCheck(TransactionFramePtr tx, Application& app, bool checkSeqNum)
                         {
                             auto current = kvp.second.current;
                             REQUIRE(current);
+                            REQUIRE(current->type() ==
+                                    InternalLedgerEntryType::LEDGER_ENTRY);
                             auto previous = kvp.second.previous;
                             REQUIRE(previous);
+                            REQUIRE(previous->type() ==
+                                    InternalLedgerEntryType::LEDGER_ENTRY);
 
                             // From V13, it's possible to remove one-time
                             // signers on early failures
                             if (ledgerVersion >= 13 && earlyFailure)
                             {
-                                auto currAcc = current->data.account();
-                                auto prevAcc = previous->data.account();
+                                auto currAcc =
+                                    current->ledgerEntry().data.account();
+                                auto prevAcc =
+                                    previous->ledgerEntry().data.account();
                                 REQUIRE(currAcc.signers.size() + 1 ==
                                         prevAcc.signers.size());
                                 // signers should be the only change so this
@@ -304,12 +360,15 @@ validateTxResults(TransactionFramePtr const& tx, Application& app,
                   TransactionResult const& applyResult)
 {
     auto shouldValidateOk = validationResult.code == txSUCCESS;
+
+    auto checkedTx = TransactionFrameBase::makeTransactionFromWire(
+        app.getNetworkID(), tx->getEnvelope());
     {
         LedgerTxn ltx(app.getLedgerTxnRoot());
-        REQUIRE(tx->checkValid(ltx, 0) == shouldValidateOk);
+        REQUIRE(checkedTx->checkValid(ltx, 0, 0, 0) == shouldValidateOk);
     }
-    REQUIRE(tx->getResult().result.code() == validationResult.code);
-    REQUIRE(tx->getResult().feeCharged == validationResult.fee);
+    REQUIRE(checkedTx->getResult().result.code() == validationResult.code);
+    REQUIRE(checkedTx->getResult().feeCharged == validationResult.fee);
 
     // do not try to apply if checkValid returned false
     if (!shouldValidateOk)
@@ -335,7 +394,15 @@ validateTxResults(TransactionFramePtr const& tx, Application& app,
 
 TxSetResultMeta
 closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
-              std::vector<TransactionFrameBasePtr> const& txs)
+              std::vector<TransactionFrameBasePtr> const& txs, bool skipValid)
+{
+    return closeLedgerOn(app, ledgerSeq, getTestDate(day, month, year), txs,
+                         skipValid);
+}
+
+TxSetResultMeta
+closeLedgerOn(Application& app, uint32 ledgerSeq, time_t closeTime,
+              std::vector<TransactionFrameBasePtr> const& txs, bool skipValid)
 {
     auto txSet = std::make_shared<TxSetFrame>(
         app.getLedgerManager().getLastClosedLedgerHeader().hash);
@@ -346,10 +413,13 @@ closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
     }
 
     txSet->sortForHash();
-    REQUIRE(txSet->checkValid(app));
+    if (!skipValid)
+    {
+        REQUIRE(txSet->checkValid(app, 0, 0));
+    }
 
-    StellarValue sv(txSet->getContentsHash(), getTestDate(day, month, year),
-                    emptyUpgradeSteps, STELLAR_VALUE_BASIC);
+    StellarValue sv(txSet->getContentsHash(), closeTime, emptyUpgradeSteps,
+                    STELLAR_VALUE_BASIC);
     LedgerCloseData ledgerData(ledgerSeq, txSet, sv);
     app.getLedgerManager().closeLedger(ledgerData);
 
@@ -415,22 +485,6 @@ getAccountSigners(PublicKey const& k, Application& app)
     LedgerTxn ltx(app.getLedgerTxnRoot());
     auto account = stellar::loadAccount(ltx, k);
     return account.current().data.account().signers;
-}
-
-MuxedAccount
-toMuxedAccount(AccountID const& a)
-{
-    MuxedAccount ret(static_cast<CryptoKeyType>(a.type()));
-    switch (a.type())
-    {
-    case PUBLIC_KEY_TYPE_ED25519:
-        ret.ed25519() = a.ed25519();
-        break;
-    default:
-        // this would be a bug
-        abort();
-    }
-    return ret;
 }
 
 TransactionFramePtr
@@ -1077,6 +1131,65 @@ bumpSequence(SequenceNumber to)
     return op;
 }
 
+Operation
+createClaimableBalance(Asset const& asset, int64_t amount,
+                       xdr::xvector<Claimant, 10> const& claimants)
+{
+    Operation op;
+    op.body.type(CREATE_CLAIMABLE_BALANCE);
+    op.body.createClaimableBalanceOp().asset = asset;
+    op.body.createClaimableBalanceOp().amount = amount;
+    op.body.createClaimableBalanceOp().claimants = claimants;
+    return op;
+}
+
+Operation
+claimClaimableBalance(ClaimableBalanceID const& balanceID)
+{
+    Operation op;
+    op.body.type(CLAIM_CLAIMABLE_BALANCE);
+    op.body.claimClaimableBalanceOp().balanceID = balanceID;
+    return op;
+}
+
+Operation
+beginSponsoringFutureReserves(PublicKey const& sponsoredID)
+{
+    Operation op;
+    op.body.type(BEGIN_SPONSORING_FUTURE_RESERVES);
+    op.body.beginSponsoringFutureReservesOp().sponsoredID = sponsoredID;
+    return op;
+}
+
+Operation
+endSponsoringFutureReserves()
+{
+    Operation op;
+    op.body.type(END_SPONSORING_FUTURE_RESERVES);
+    return op;
+}
+
+Operation
+revokeSponsorship(LedgerKey const& key)
+{
+    Operation op;
+    op.body.type(REVOKE_SPONSORSHIP);
+    op.body.revokeSponsorshipOp().type(REVOKE_SPONSORSHIP_LEDGER_ENTRY);
+    op.body.revokeSponsorshipOp().ledgerKey() = key;
+    return op;
+}
+
+Operation
+revokeSponsorship(AccountID const& accID, SignerKey const& key)
+{
+    Operation op;
+    op.body.type(REVOKE_SPONSORSHIP);
+    op.body.revokeSponsorshipOp().type(REVOKE_SPONSORSHIP_SIGNER);
+    op.body.revokeSponsorshipOp().signer().accountID = accID;
+    op.body.revokeSponsorshipOp().signer().signerKey = key;
+    return op;
+}
+
 OperationFrame const&
 getFirstOperationFrame(TransactionFrame const& tx)
 {
@@ -1108,5 +1221,41 @@ checkTx(int index, TxSetResultMeta& r, TransactionResultCode expected,
     checkTx(index, r, expected);
     REQUIRE(r[index].first.result.result.results()[0].code() == code);
 };
+
+static void
+sign(Hash const& networkID, SecretKey key, TransactionV1Envelope& env)
+{
+    env.signatures.emplace_back(SignatureUtils::sign(
+        key, sha256(xdr::xdr_to_opaque(networkID, ENVELOPE_TYPE_TX, env.tx))));
+}
+
+static TransactionEnvelope
+envelopeFromOps(Hash const& networkID, TestAccount& source,
+                std::vector<Operation> const& ops,
+                std::vector<SecretKey> const& opKeys)
+{
+    TransactionEnvelope tx(ENVELOPE_TYPE_TX);
+    tx.v1().tx.sourceAccount = toMuxedAccount(source);
+    tx.v1().tx.fee = uint32_t(100) * uint32_t(ops.size());
+    tx.v1().tx.seqNum = source.nextSequenceNumber();
+    std::copy(ops.begin(), ops.end(),
+              std::back_inserter(tx.v1().tx.operations));
+
+    sign(networkID, source, tx.v1());
+    for (auto const& opKey : opKeys)
+    {
+        sign(networkID, opKey, tx.v1());
+    }
+    return tx;
+}
+
+TransactionFrameBasePtr
+transactionFrameFromOps(Hash const& networkID, TestAccount& source,
+                        std::vector<Operation> const& ops,
+                        std::vector<SecretKey> const& opKeys)
+{
+    return TransactionFrameBase::makeTransactionFromWire(
+        networkID, envelopeFromOps(networkID, source, ops, opKeys));
+}
 }
 }

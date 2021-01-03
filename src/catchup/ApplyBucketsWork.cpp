@@ -15,7 +15,8 @@
 #include "invariant/InvariantManager.h"
 #include "ledger/LedgerTxn.h"
 #include "main/Application.h"
-#include "util/format.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 #include <medida/meter.h>
 #include <medida/metrics_registry.h>
 
@@ -63,7 +64,8 @@ ApplyBucketsWork::getBucket(std::string const& hash)
 void
 ApplyBucketsWork::onReset()
 {
-    CLOG(INFO, "History") << "Applying buckets";
+    ZoneScoped;
+    CLOG_INFO(History, "Applying buckets");
 
     mTotalBuckets = 0;
     mAppliedBuckets = 0;
@@ -102,9 +104,10 @@ ApplyBucketsWork::onReset()
 void
 ApplyBucketsWork::startLevel()
 {
+    ZoneScoped;
     assert(isLevelComplete());
 
-    CLOG(DEBUG, "History") << "ApplyBuckets : starting level " << mLevel;
+    CLOG_DEBUG(History, "ApplyBuckets : starting level {}", mLevel);
     auto& level = getBucketLevel(mLevel);
     HistoryStateBucket const& i = mApplyState.currentBuckets.at(mLevel);
 
@@ -128,8 +131,8 @@ ApplyBucketsWork::startLevel()
         mSnapBucket = getBucket(i.snap);
         mSnapApplicator = std::make_unique<BucketApplicator>(
             mApp, mMaxProtocolVersion, mSnapBucket);
-        CLOG(DEBUG, "History") << "ApplyBuckets : starting level[" << mLevel
-                               << "].snap = " << i.snap;
+        CLOG_DEBUG(History, "ApplyBuckets : starting level[{}].snap = {}",
+                   mLevel, i.snap);
         mApplying = true;
         mBucketApplyStart.Mark();
     }
@@ -138,8 +141,8 @@ ApplyBucketsWork::startLevel()
         mCurrBucket = getBucket(i.curr);
         mCurrApplicator = std::make_unique<BucketApplicator>(
             mApp, mMaxProtocolVersion, mCurrBucket);
-        CLOG(DEBUG, "History") << "ApplyBuckets : starting level[" << mLevel
-                               << "].curr = " << i.curr;
+        CLOG_DEBUG(History, "ApplyBuckets : starting level[{}].curr = {}",
+                   mLevel, i.curr);
         mApplying = true;
         mBucketApplyStart.Mark();
     }
@@ -148,11 +151,12 @@ ApplyBucketsWork::startLevel()
 BasicWork::State
 ApplyBucketsWork::onRun()
 {
+    ZoneScoped;
     if (!mHaveCheckedApplyStateValidity && mLevel == BucketList::kNumLevels - 1)
     {
         if (!mApplyState.containsValidBuckets(mApp))
         {
-            CLOG(ERROR, "History") << "Malformed HAS: unable to apply buckets";
+            CLOG_ERROR(History, "Malformed HAS: unable to apply buckets");
             return State::WORK_FAILURE;
         }
         mHaveCheckedApplyStateValidity = true;
@@ -200,12 +204,11 @@ ApplyBucketsWork::onRun()
     if (mLevel != 0)
     {
         --mLevel;
-        CLOG(DEBUG, "History")
-            << "ApplyBuckets : starting next level: " << mLevel;
+        CLOG_DEBUG(History, "ApplyBuckets : starting next level: {}", mLevel);
         return State::WORK_RUNNING;
     }
 
-    CLOG(INFO, "History") << "ApplyBuckets : done, restarting merges";
+    CLOG_INFO(History, "ApplyBuckets : done, restarting merges");
     mApp.getBucketManager().assumeState(mApplyState, mMaxProtocolVersion);
 
     return State::WORK_SUCCESS;
@@ -215,6 +218,7 @@ void
 ApplyBucketsWork::advance(std::string const& bucketName,
                           BucketApplicator& applicator)
 {
+    ZoneScoped;
     assert(applicator);
     assert(mTotalSize != 0);
     auto sz = applicator.advance(mCounters);
@@ -246,11 +250,10 @@ ApplyBucketsWork::advance(std::string const& bucketName,
 
     if (log)
     {
-        CLOG(INFO, "Bucket")
-            << "Bucket-apply: " << mAppliedEntries << " entries in "
-            << formatSize(mAppliedSize) << "/" << formatSize(mTotalSize)
-            << " in " << mAppliedBuckets << "/" << mTotalBuckets << " files ("
-            << (100 * mAppliedSize / mTotalSize) << "%)";
+        CLOG_INFO(
+            Bucket, "Bucket-apply: {} entries in {}/{} in {}/{} files ({}%)",
+            mAppliedEntries, formatSize(mAppliedSize), formatSize(mTotalSize),
+            mAppliedBuckets, mTotalBuckets, (100 * mAppliedSize / mTotalSize));
     }
 }
 

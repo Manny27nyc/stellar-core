@@ -8,7 +8,8 @@
 #include "history/HistoryArchive.h"
 #include "historywork/GetAndUnzipRemoteFileWork.h"
 #include "historywork/VerifyBucketWork.h"
-#include "util/format.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -60,6 +61,7 @@ DownloadBucketsWork::resetIter()
 std::shared_ptr<BasicWork>
 DownloadBucketsWork::yieldMoreWork()
 {
+    ZoneScoped;
     if (!hasNext())
     {
         throw std::runtime_error("Nothing to iterate over!");
@@ -68,8 +70,23 @@ DownloadBucketsWork::yieldMoreWork()
     auto hash = *mNextBucketIter;
     FileTransferInfo ft(mDownloadDir, HISTORY_FILE_TYPE_BUCKET, hash);
     auto w1 = std::make_shared<GetAndUnzipRemoteFileWork>(mApp, ft, mArchive);
+
+    auto getFileWeak = std::weak_ptr<GetAndUnzipRemoteFileWork>(w1);
+    OnFailureCallback cb = [getFileWeak, hash]() {
+        auto getFile = getFileWeak.lock();
+        if (getFile)
+        {
+            auto ar = getFile->getArchive();
+            if (ar)
+            {
+                CLOG_INFO(History, "Bucket {} from archive {}", hash,
+                          ar->getName());
+            }
+        }
+    };
+
     auto w2 = std::make_shared<VerifyBucketWork>(
-        mApp, mBuckets, ft.localPath_nogz(), hexToBin256(hash));
+        mApp, mBuckets, ft.localPath_nogz(), hexToBin256(hash), cb);
     std::vector<std::shared_ptr<BasicWork>> seq{w1, w2};
     auto w3 = std::make_shared<WorkSequence>(
         mApp, "download-verify-sequence-" + hash, seq);

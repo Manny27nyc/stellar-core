@@ -5,6 +5,8 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "main/Config.h"
+#include "util/optional.h"
+#include "xdr/Stellar-ledger-entries.h"
 #include "xdr/Stellar-types.h"
 #include <lib/json/json.h>
 #include <memory>
@@ -218,8 +220,9 @@ class Application
     // with caution.
     virtual asio::io_context& getWorkerIOContext() = 0;
 
-    virtual void postOnMainThread(std::function<void()>&& f,
-                                  VirtualClock::ExecutionCategory&& jobID) = 0;
+    virtual void postOnMainThread(
+        std::function<void()>&& f, std::string&& name,
+        Scheduler::ActionType type = Scheduler::ActionType::NORMAL_ACTION) = 0;
     virtual void postOnBackgroundThread(std::function<void()>&& f,
                                         std::string jobName) = 0;
 
@@ -239,16 +242,23 @@ class Application
     // returns.
     virtual void joinAllThreads() = 0;
 
-    // If config.MANUAL_MODE=true, force the current ledger to close and return
+    // If config.MANUAL_CLOSE=true, force the current ledger to close and return
     // true. Otherwise return false. This method exists only for testing.
-    virtual bool manualClose() = 0;
+    //
+    // Non-default parameters may be specified only if additionally
+    // config.RUN_STANDALONE=true.
+    virtual std::string
+    manualClose(optional<uint32_t> const& manualLedgerSeq,
+                optional<TimePoint> const& manualCloseTime) = 0;
 
 #ifdef BUILD_TESTS
     // If config.ARTIFICIALLY_GENERATE_LOAD_FOR_TESTING=true, generate some load
     // against the current application.
     virtual void generateLoad(bool isCreate, uint32_t nAccounts,
                               uint32_t offset, uint32_t nTxs, uint32_t txRate,
-                              uint32_t batchSize) = 0;
+                              uint32_t batchSize,
+                              std::chrono::seconds spikeInterval,
+                              uint32_t spikeSize) = 0;
 
     // Access the load generator for manual operation.
     virtual LoadGenerator& getLoadGenerator() = 0;
@@ -279,11 +289,12 @@ class Application
     // copy made of `cfg`
     static pointer create(VirtualClock& clock, Config const& cfg,
                           bool newDB = true);
-    template <typename T>
+    template <typename T, typename... Args>
     static std::shared_ptr<T>
-    create(VirtualClock& clock, Config const& cfg, bool newDB = true)
+    create(VirtualClock& clock, Config const& cfg, Args&&... args,
+           bool newDB = true)
     {
-        auto ret = std::make_shared<T>(clock, cfg);
+        auto ret = std::make_shared<T>(clock, cfg, std::forward<Args>(args)...);
         ret->initialize(newDB);
         validateNetworkPassphrase(ret);
 

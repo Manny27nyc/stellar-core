@@ -8,8 +8,9 @@
 #include "history/HistoryManager.h"
 #include "historywork/GetAndUnzipRemoteFileWork.h"
 #include "historywork/Progress.h"
-#include "lib/util/format.h"
 #include "main/Application.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -41,16 +42,17 @@ BatchDownloadWork::getStatus() const
 std::shared_ptr<BasicWork>
 BatchDownloadWork::yieldMoreWork()
 {
+    ZoneScoped;
     if (!hasNext())
     {
-        CLOG(WARNING, "Work")
-            << getName() << " has no more children to iterate over! ";
+        CLOG_WARNING(Work, "{} has no more children to iterate over! ",
+                     getName());
         return nullptr;
     }
 
     FileTransferInfo ft(mDownloadDir, mFileType, mNext);
-    CLOG(DEBUG, "History") << "Downloading and unzipping " << mFileType
-                           << " for checkpoint " << mNext;
+    CLOG_DEBUG(History, "Downloading and unzipping {} for checkpoint {}",
+               mFileType, mNext);
     auto getAndUnzip =
         std::make_shared<GetAndUnzipRemoteFileWork>(mApp, ft, mArchive);
     mNext += mApp.getHistoryManager().getCheckpointFrequency();

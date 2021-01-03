@@ -17,7 +17,8 @@
 #include "util/Fs.h"
 #include "util/Logging.h"
 #include "util/Timer.h"
-#include "util/format.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 #include <algorithm>
 #include <functional>
@@ -88,20 +89,19 @@ class ProcessExitEvent::Impl
     bool
     finish()
     {
+        ZoneScoped;
         if (!mOutFile.empty())
         {
             if (fs::exists(mOutFile))
             {
-                CLOG(WARNING, "Process")
-                    << "Outfile already exists: " << mOutFile;
+                CLOG_WARNING(Process, "Outfile already exists: {}", mOutFile);
                 return false;
             }
             else if (mRunning &&
                      std::rename(mTempFile.c_str(), mOutFile.c_str()))
             {
-                CLOG(ERROR, "Process")
-                    << fmt::format("{} -> {} rename failed, error: {}",
-                                   mTempFile, mOutFile, errno);
+                CLOG_ERROR(Process, "{} -> {} rename failed, error: {}",
+                           mTempFile, mOutFile, errno);
                 return false;
             }
         }
@@ -191,10 +191,12 @@ ProcessManagerImpl::shutdown()
 bool
 ProcessManagerImpl::tryProcessShutdown(std::shared_ptr<ProcessExitEvent> pe)
 {
+    ZoneScoped;
     if (!pe)
     {
-        CLOG(ERROR, "Process")
-            << "Process shutdown: must provide valid ProcessExitEvent pointer";
+        CLOG_ERROR(
+            Process,
+            "Process shutdown: must provide valid ProcessExitEvent pointer");
         throw std::runtime_error("Invalid ProcessExitEvent");
     }
 
@@ -206,7 +208,7 @@ ProcessManagerImpl::tryProcessShutdown(std::shared_ptr<ProcessExitEvent> pe)
     auto killableIt = find(mKillable.begin(), mKillable.end(), pe);
     if (killableIt != mKillable.end())
     {
-        CLOG(DEBUG, "Process") << "Shutting down (forced): " << impl->mCmdLine;
+        CLOG_DEBUG(Process, "Shutting down (forced): {}", impl->mCmdLine);
         forceShutdown(*pe);
         return true;
     }
@@ -216,7 +218,7 @@ ProcessManagerImpl::tryProcessShutdown(std::shared_ptr<ProcessExitEvent> pe)
     // 2. Process is currently running, in which case we try to kill it nicely
     // 3. Process didn't get killed correctly, so we issue a force kill
 
-    CLOG(DEBUG, "Process") << "Shutting down (nicely): " << impl->mCmdLine;
+    CLOG_DEBUG(Process, "Shutting down (nicely): {}", impl->mCmdLine);
     auto pendingIt = find(mPending.begin(), mPending.end(), pe);
     if (pendingIt != mPending.end())
     {
@@ -241,8 +243,7 @@ ProcessManagerImpl::tryProcessShutdown(std::shared_ptr<ProcessExitEvent> pe)
         }
         else
         {
-            CLOG(DEBUG, "Process")
-                << "failed to find pending or running process";
+            CLOG_DEBUG(Process, "failed to find pending or running process");
             return false;
         }
     }
@@ -289,6 +290,7 @@ struct InfoHelper
     void
     prepare()
     {
+        ZoneScoped;
         if (mInitialized)
         {
             throw std::runtime_error(
@@ -303,8 +305,8 @@ struct InfoHelper
         if (!InitializeProcThreadAttributeList(mStartupInfo.lpAttributeList, 1,
                                                0, &atSize))
         {
-            CLOG(ERROR, "Process")
-                << "InfoHelper::prepare() failed: " << GetLastError();
+            CLOG_ERROR(Process, "InfoHelper::prepare() failed: {}",
+                       GetLastError());
             throw std::runtime_error("InfoHelper::prepare() failed");
         }
         mInitialized = true;
@@ -313,8 +315,8 @@ struct InfoHelper
                 PROC_THREAD_ATTRIBUTE_HANDLE_LIST, mHandles.data(),
                 mHandles.size() * sizeof(HANDLE), NULL, NULL))
         {
-            CLOG(ERROR, "Process")
-                << "InfoHelper::prepare() failed: " << GetLastError();
+            CLOG_ERROR(Process, "InfoHelper::prepare() failed: {}",
+                       GetLastError());
             throw std::runtime_error("InfoHelper::prepare() failed");
         }
     }
@@ -331,11 +333,12 @@ struct InfoHelper
 void
 ProcessExitEvent::Impl::run()
 {
+    ZoneScoped;
     auto manager = mProcManagerImpl.lock();
     assert(manager && !manager->isShutdown());
     if (mRunning)
     {
-        CLOG(ERROR, "Process") << "ProcessExitEvent::Impl already running";
+        CLOG_ERROR(Process, "ProcessExitEvent::Impl already running");
         throw std::runtime_error("ProcessExitEvent::Impl already running");
     }
 
@@ -365,7 +368,7 @@ ProcessExitEvent::Impl::run()
                        NULL);                 // no attr. template
         if (si.hStdOutput == INVALID_HANDLE_VALUE)
         {
-            CLOG(ERROR, "Process") << "CreateFile() failed: " << GetLastError();
+            CLOG_ERROR(Process, "CreateFile() failed: {}", GetLastError());
             throw std::runtime_error("CreateFile() failed");
         }
         iH.mHandles.push_back(si.hStdOutput);
@@ -408,7 +411,7 @@ ProcessExitEvent::Impl::run()
         {
             CloseHandle(si.hStdOutput);
         }
-        CLOG(ERROR, "Process") << "CreateProcess() failed: " << lastErr;
+        CLOG_ERROR(Process, "CreateProcess() failed: {}", lastErr);
 
         throw std::runtime_error("CreateProcess() failed");
     }
@@ -459,6 +462,7 @@ ProcessExitEvent::Impl::run()
 asio::error_code
 ProcessManagerImpl::handleProcessTermination(int pid, int /*status*/)
 {
+    ZoneScoped;
     std::lock_guard<std::recursive_mutex> guard(mProcessesMutex);
     auto ec = asio::error_code();
     auto process = mProcesses.find(pid);
@@ -473,11 +477,13 @@ ProcessManagerImpl::handleProcessTermination(int pid, int /*status*/)
 bool
 ProcessManagerImpl::cleanShutdown(ProcessExitEvent& pe)
 {
+    ZoneScoped;
     if (!GenerateConsoleCtrlEvent(CTRL_C_EVENT, pe.mImpl->getProcessId()))
     {
-        CLOG(WARNING, "Process")
-            << "failed to cleanly shutdown process with pid "
-            << pe.mImpl->getProcessId() << ", error code " << GetLastError();
+        CLOG_WARNING(
+            Process,
+            "failed to cleanly shutdown process with pid {}, error code {}",
+            pe.mImpl->getProcessId(), GetLastError());
         return false;
     }
     return true;
@@ -486,11 +492,13 @@ ProcessManagerImpl::cleanShutdown(ProcessExitEvent& pe)
 bool
 ProcessManagerImpl::forceShutdown(ProcessExitEvent& pe)
 {
+    ZoneScoped;
     if (!TerminateProcess(pe.mImpl->mProcessHandle.native_handle(), 1))
     {
-        CLOG(WARNING, "Process")
-            << "failed to force shutdown of process with pid "
-            << pe.mImpl->getProcessId() << ", error code " << GetLastError();
+        CLOG_WARNING(
+            Process,
+            "failed to force shutdown of process with pid {}, error code {}",
+            pe.mImpl->getProcessId(), GetLastError());
         return false;
     }
     // Cancel any pending events on the handle. Ignore error code
@@ -547,8 +555,8 @@ ProcessManagerImpl::handleSignalWait()
 
     if (!signaledChildren.empty())
     {
-        CLOG(DEBUG, "Process") << "found " << signaledChildren.size()
-                               << " child processes that terminated";
+        CLOG_DEBUG(Process, "found {} child processes that terminated",
+                   signaledChildren.size());
         // Now go all over all (pid, status) and handle them
         for (auto const& pidStatus : signaledChildren)
         {
@@ -563,13 +571,14 @@ ProcessManagerImpl::handleSignalWait()
 asio::error_code
 ProcessManagerImpl::handleProcessTermination(int pid, int status)
 {
+    ZoneScoped;
     std::lock_guard<std::recursive_mutex> guard(mProcessesMutex);
     auto ec = asio::error_code();
 
     auto pair = mProcesses.find(pid);
     if (pair == mProcesses.end())
     {
-        CLOG(DEBUG, "Process") << "failed to find process with pid " << pid;
+        CLOG_DEBUG(Process, "failed to find process with pid {}", pid);
         return ec;
     }
     auto impl = pair->second->mImpl;
@@ -578,15 +587,13 @@ ProcessManagerImpl::handleProcessTermination(int pid, int status)
     {
         if (WEXITSTATUS(status) == 0)
         {
-            CLOG(DEBUG, "Process")
-                << "process " << pid << " exited " << WEXITSTATUS(status)
-                << ": " << impl->mCmdLine;
+            CLOG_DEBUG(Process, "process {} exited {}: {}", pid,
+                       WEXITSTATUS(status), impl->mCmdLine);
         }
         else
         {
-            CLOG(WARNING, "Process")
-                << "process " << pid << " exited " << WEXITSTATUS(status)
-                << ": " << impl->mCmdLine;
+            CLOG_WARNING(Process, "process {} exited {}: {}", pid,
+                         WEXITSTATUS(status), impl->mCmdLine);
         }
 #ifdef __linux__
         // Linux posix_spawnp does not fault on file-not-found in the
@@ -595,15 +602,15 @@ ProcessManagerImpl::handleProcessTermination(int pid, int status)
         // easily-overlooked shell-like 'exit 127' on waitpid.
         if (WEXITSTATUS(status) == 127)
         {
-            CLOG(WARNING, "Process") << "";
-            CLOG(WARNING, "Process") << "************";
-            CLOG(WARNING, "Process") << "";
-            CLOG(WARNING, "Process") << "  likely 'missing command':";
-            CLOG(WARNING, "Process") << "";
-            CLOG(WARNING, "Process") << "    " << impl->mCmdLine;
-            CLOG(WARNING, "Process") << "";
-            CLOG(WARNING, "Process") << "************";
-            CLOG(WARNING, "Process") << "";
+            CLOG_WARNING(Process, "");
+            CLOG_WARNING(Process, "************");
+            CLOG_WARNING(Process, "");
+            CLOG_WARNING(Process, "  likely 'missing command':");
+            CLOG_WARNING(Process, "");
+            CLOG_WARNING(Process, "    {}", impl->mCmdLine);
+            CLOG_WARNING(Process, "");
+            CLOG_WARNING(Process, "************");
+            CLOG_WARNING(Process, "");
         }
 #endif
         // FIXME: this doesn't _quite_ do the right thing; it conveys
@@ -644,11 +651,12 @@ ProcessManagerImpl::handleProcessTermination(int pid, int status)
 bool
 ProcessManagerImpl::cleanShutdown(ProcessExitEvent& pe)
 {
+    ZoneScoped;
     const int pid = pe.mImpl->getProcessId();
     if (kill(pid, SIGINT) != 0)
     {
-        CLOG(WARNING, "Process")
-            << "kill (SIGINT) failed for pid " << pid << ", errno " << errno;
+        CLOG_WARNING(Process, "kill (SIGINT) failed for pid {}, errno {}", pid,
+                     errno);
         return false;
     }
     return true;
@@ -657,11 +665,12 @@ ProcessManagerImpl::cleanShutdown(ProcessExitEvent& pe)
 bool
 ProcessManagerImpl::forceShutdown(ProcessExitEvent& pe)
 {
+    ZoneScoped;
     const int pid = pe.mImpl->getProcessId();
     if (kill(pid, SIGKILL) != 0)
     {
-        CLOG(WARNING, "Process")
-            << "kill (SIGKILL) failed for pid " << pid << ", errno " << errno;
+        CLOG_WARNING(Process, "kill (SIGKILL) failed for pid {}, errno {}", pid,
+                     errno);
         return false;
     }
     return true;
@@ -680,11 +689,12 @@ split(std::string const& s)
 void
 ProcessExitEvent::Impl::run()
 {
+    ZoneScoped;
     auto manager = mProcManagerImpl.lock();
     assert(manager && !manager->isShutdown());
     if (mRunning)
     {
-        CLOG(ERROR, "Process") << "ProcessExitEvent::Impl already running";
+        CLOG_ERROR(Process, "ProcessExitEvent::Impl already running");
         throw std::runtime_error("ProcessExitEvent::Impl already running");
     }
     std::vector<std::string> args = split(mCmdLine);
@@ -730,7 +740,7 @@ ProcessExitEvent::Impl::run()
                        argv.data(), environ);
     if (err)
     {
-        CLOG(ERROR, "Process") << "posix_spawn() failed: " << strerror(err);
+        CLOG_ERROR(Process, "posix_spawn() failed: {}", strerror(err));
         throw std::runtime_error("posix_spawn() failed");
     }
 
@@ -742,6 +752,7 @@ ProcessExitEvent::Impl::run()
 std::weak_ptr<ProcessExitEvent>
 ProcessManagerImpl::runProcess(std::string const& cmdLine, std::string outFile)
 {
+    ZoneScoped;
     std::lock_guard<std::recursive_mutex> guard(mProcessesMutex);
     auto pe =
         std::shared_ptr<ProcessExitEvent>(new ProcessExitEvent(mIOContext));
@@ -763,6 +774,7 @@ ProcessManagerImpl::runProcess(std::string const& cmdLine, std::string outFile)
 void
 ProcessManagerImpl::maybeRunPendingProcesses()
 {
+    ZoneScoped;
     if (mIsShutdown)
     {
         return;
@@ -774,7 +786,7 @@ ProcessManagerImpl::maybeRunPendingProcesses()
         mPending.pop_front();
         try
         {
-            CLOG(DEBUG, "Process") << "Running: " << i->mImpl->mCmdLine;
+            CLOG_DEBUG(Process, "Running: {}", i->mImpl->mCmdLine);
 
             if (fs::exists(i->mImpl->mOutFile))
             {
@@ -789,8 +801,8 @@ ProcessManagerImpl::maybeRunPendingProcesses()
         catch (std::runtime_error& e)
         {
             i->mImpl->cancel(std::make_error_code(std::errc::io_error));
-            CLOG(ERROR, "Process") << "Error starting process: " << e.what();
-            CLOG(ERROR, "Process") << "When running: " << i->mImpl->mCmdLine;
+            CLOG_ERROR(Process, "Error starting process: {}", e.what());
+            CLOG_ERROR(Process, "When running: {}", i->mImpl->mCmdLine);
         }
     }
 }

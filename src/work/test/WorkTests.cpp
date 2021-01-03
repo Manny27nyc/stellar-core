@@ -3,12 +3,12 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "lib/catch.hpp"
-#include "lib/util/format.h"
 #include "main/Application.h"
 #include "process/ProcessManager.h"
 #include "test/TestUtils.h"
 #include "test/test.h"
 #include "work/WorkScheduler.h"
+#include <fmt/format.h>
 
 #include "historywork/RunCommandWork.h"
 #include "work/BatchWork.h"
@@ -49,7 +49,7 @@ class TestBasicWork : public BasicWork
     BasicWork::State
     onRun() override
     {
-        CLOG(DEBUG, "Work") << "Running " << getName();
+        CLOG_DEBUG(Work, "Running {}", getName());
         mRunningCount++;
         mApp.getClock().sleep_for(std::chrono::milliseconds(1));
         if (--mCount > 0)
@@ -62,7 +62,7 @@ class TestBasicWork : public BasicWork
     bool
     onAbort() override
     {
-        CLOG(DEBUG, "Work") << "Aborting " << getName();
+        CLOG_DEBUG(Work, "Aborting {}", getName());
         ++mAbortCount;
         return true;
     }

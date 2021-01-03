@@ -12,7 +12,8 @@
 #include "historywork/PutHistoryArchiveStateWork.h"
 #include "main/Application.h"
 #include "work/WorkSequence.h"
-#include <util/format.h>
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -31,6 +32,7 @@ PutSnapshotFilesWork::PutSnapshotFilesWork(
 BasicWork::State
 PutSnapshotFilesWork::doWork()
 {
+    ZoneScoped;
     if (!mUploadSeqs.empty())
     {
         return WorkUtils::getWorkStatus(mUploadSeqs);
@@ -102,7 +104,7 @@ PutSnapshotFilesWork::doReset()
     mUploadSeqs.clear();
 }
 
-std::unordered_set<std::string>
+UnorderedSet<std::string>
 PutSnapshotFilesWork::getFilesToZip()
 {
     // Sanity check: there are states for all archives
@@ -112,7 +114,7 @@ PutSnapshotFilesWork::getFilesToZip()
         throw std::runtime_error("Corrupted GetHistoryArchiveStateWork");
     }
 
-    std::unordered_set<std::string> filesToZip{};
+    UnorderedSet<std::string> filesToZip{};
     for (auto const& getState : mGetStateWorks)
     {
         for (auto const& f :

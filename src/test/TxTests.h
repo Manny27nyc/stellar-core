@@ -7,7 +7,6 @@
 #include "crypto/SecretKey.h"
 #include "herder/LedgerCloseData.h"
 #include "overlay/StellarXDR.h"
-#include "test/TestPrinter.h"
 #include "util/optional.h"
 
 namespace stellar
@@ -17,6 +16,7 @@ class ConstLedgerTxnEntry;
 class TransactionFrame;
 class OperationFrame;
 class TxSetFrame;
+class TestAccount;
 
 namespace txtest
 {
@@ -72,8 +72,14 @@ void validateTxResults(TransactionFramePtr const& tx, Application& app,
                        TransactionResult const& applyResult = {});
 
 TxSetResultMeta
+closeLedgerOn(Application& app, uint32 ledgerSeq, time_t closeTime,
+              std::vector<TransactionFrameBasePtr> const& txs = {},
+              bool skipValid = false);
+
+TxSetResultMeta
 closeLedgerOn(Application& app, uint32 ledgerSeq, int day, int month, int year,
-              std::vector<TransactionFrameBasePtr> const& txs = {});
+              std::vector<TransactionFrameBasePtr> const& txs = {},
+              bool skipValid = false);
 
 SecretKey getRoot(Hash const& networkID);
 
@@ -88,8 +94,6 @@ bool doesAccountExist(Application& app, PublicKey const& k);
 
 xdr::xvector<Signer, 20> getAccountSigners(PublicKey const& k,
                                            Application& app);
-
-MuxedAccount toMuxedAccount(AccountID const& a);
 
 TransactionFramePtr
 transactionFromOperationsV0(Application& app, SecretKey const& from,
@@ -123,6 +127,11 @@ Operation createAccount(PublicKey const& dest, int64_t amount);
 Operation payment(PublicKey const& to, int64_t amount);
 
 Operation payment(PublicKey const& to, Asset const& asset, int64_t amount);
+
+Operation createClaimableBalance(Asset const& asset, int64_t amount,
+                                 xdr::xvector<Claimant, 10> const& claimants);
+
+Operation claimClaimableBalance(ClaimableBalanceID const& balanceID);
 
 TransactionFramePtr createPaymentTx(Application& app, SecretKey const& from,
                                     PublicKey const& to, SequenceNumber seq,
@@ -182,6 +191,11 @@ SetOptionsArguments clearFlags(uint32_t clearFlags);
 SetOptionsArguments setInflationDestination(AccountID inflationDest);
 SetOptionsArguments setHomeDomain(std::string const& homeDomain);
 
+Operation beginSponsoringFutureReserves(PublicKey const& sponsoredID);
+Operation endSponsoringFutureReserves();
+Operation revokeSponsorship(LedgerKey const& key);
+Operation revokeSponsorship(AccountID const& accID, SignerKey const& key);
+
 Asset makeNativeAsset();
 Asset makeInvalidAsset();
 Asset makeAsset(SecretKey const& issuer, std::string const& code);
@@ -196,5 +210,9 @@ void checkTx(int index, TxSetResultMeta& r, TransactionResultCode expected);
 void checkTx(int index, TxSetResultMeta& r, TransactionResultCode expected,
              OperationResultCode code);
 
+TransactionFrameBasePtr
+transactionFrameFromOps(Hash const& networkID, TestAccount& source,
+                        std::vector<Operation> const& ops,
+                        std::vector<SecretKey> const& opKeys);
 } // end txtest namespace
 }

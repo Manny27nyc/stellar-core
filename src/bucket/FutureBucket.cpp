@@ -17,7 +17,9 @@
 #include "main/ErrorMessages.h"
 #include "util/LogSlowExecution.h"
 #include "util/Logging.h"
-#include "util/format.h"
+#include "util/Thread.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 #include "medida/metrics_registry.h"
 
@@ -37,6 +39,7 @@ FutureBucket::FutureBucket(Application& app,
     , mInputSnapBucket(snap)
     , mInputShadowBuckets(shadows)
 {
+    ZoneScoped;
     // Constructed with a bunch of inputs, _immediately_ commence merging
     // them; there's no valid state for have-inputs-but-not-merging, the
     // presence of inputs implies merging, and vice-versa.
@@ -63,6 +66,7 @@ FutureBucket::FutureBucket(Application& app,
 void
 FutureBucket::setLiveOutput(std::shared_ptr<Bucket> output)
 {
+    ZoneScoped;
     mState = FB_LIVE_OUTPUT;
     mOutputBucketHash = binToHex(output->getHash());
     mOutputBucket = output;
@@ -78,6 +82,7 @@ checkHashEq(std::shared_ptr<Bucket> const& b, std::string const& h)
 void
 FutureBucket::checkHashesMatch() const
 {
+    ZoneScoped;
     if (!mInputShadowBuckets.empty())
     {
         assert(mInputShadowBuckets.size() == mInputShadowBucketHashes.size());
@@ -224,19 +229,20 @@ FutureBucket::isClear() const
 bool
 FutureBucket::mergeComplete() const
 {
+    ZoneScoped;
     assert(isLive());
     if (mOutputBucket)
     {
         return true;
     }
 
-    auto status = mOutputBucketFuture.wait_for(std::chrono::nanoseconds(1));
-    return status == std::future_status::ready;
+    return futureIsReady(mOutputBucketFuture);
 }
 
 std::shared_ptr<Bucket>
 FutureBucket::resolve()
 {
+    ZoneScoped;
     checkState();
     assert(isLive());
 
@@ -298,6 +304,7 @@ void
 FutureBucket::startMerge(Application& app, uint32_t maxProtocolVersion,
                          bool countMergeEvents, uint32_t level)
 {
+    ZoneScoped;
     // NB: startMerge starts with FutureBucket in a half-valid state; the inputs
     // are live but the merge is not yet running. So you can't call checkState()
     // on entry, only on exit.
@@ -313,9 +320,8 @@ FutureBucket::startMerge(Application& app, uint32_t maxProtocolVersion,
     assert(!mOutputBucketFuture.valid());
     assert(!mOutputBucket);
 
-    CLOG(TRACE, "Bucket") << "Preparing merge of curr="
-                          << hexAbbrev(curr->getHash())
-                          << " with snap=" << hexAbbrev(snap->getHash());
+    CLOG_TRACE(Bucket, "Preparing merge of curr={} with snap={}",
+               hexAbbrev(curr->getHash()), hexAbbrev(snap->getHash()));
 
     BucketManager& bm = app.getBucketManager();
     auto& timer = app.getMetrics().NewTimer(
@@ -333,9 +339,9 @@ FutureBucket::startMerge(Application& app, uint32_t maxProtocolVersion,
     auto f = bm.getMergeFuture(mk);
     if (f.valid())
     {
-        CLOG(TRACE, "Bucket") << "Re-attached to existing merge of curr="
-                              << hexAbbrev(curr->getHash())
-                              << " with snap=" << hexAbbrev(snap->getHash());
+        CLOG_TRACE(Bucket,
+                   "Re-attached to existing merge of curr={} with snap={}",
+                   hexAbbrev(curr->getHash()), hexAbbrev(snap->getHash()));
         mOutputBucketFuture = f;
         checkState();
         return;
@@ -345,31 +351,36 @@ FutureBucket::startMerge(Application& app, uint32_t maxProtocolVersion,
         [curr, snap, &bm, shadows, maxProtocolVersion, countMergeEvents, level,
          &timer, &app]() mutable {
             auto timeScope = timer.TimeScope();
-            CLOG(TRACE, "Bucket")
-                << "Worker merging curr=" << hexAbbrev(curr->getHash())
-                << " with snap=" << hexAbbrev(snap->getHash());
+            CLOG_TRACE(Bucket, "Worker merging curr={} with snap={}",
+                       hexAbbrev(curr->getHash()), hexAbbrev(snap->getHash()));
 
             try
             {
+                ZoneNamedN(mergeZone, "Merge task", true);
+                ZoneValueV(mergeZone, static_cast<int64_t>(level));
+
                 auto res = Bucket::merge(
                     bm, maxProtocolVersion, curr, snap, shadows,
                     BucketList::keepDeadEntries(level), countMergeEvents,
                     app.getClock().getIOContext(),
                     !app.getConfig().DISABLE_XDR_FSYNC);
 
-                CLOG(TRACE, "Bucket")
-                    << "Worker finished merging curr="
-                    << hexAbbrev(curr->getHash())
-                    << " with snap=" << hexAbbrev(snap->getHash());
+                if (res)
+                {
+                    CLOG_TRACE(
+                        Bucket, "Worker finished merging curr={} with snap={}",
+                        hexAbbrev(curr->getHash()), hexAbbrev(snap->getHash()));
 
-                std::chrono::duration<double> time(timeScope.Stop());
-                double timePct = time.count() /
-                                 getAvailableTimeForMerge(app, level).count() *
-                                 100;
-                CLOG(DEBUG, "Perf")
-                    << "Bucket merge on level " << level << " finished in "
-                    << time.count() << " seconds (" << timePct
-                    << "% of available time)";
+                    std::chrono::duration<double> time(timeScope.Stop());
+                    double timePct =
+                        time.count() /
+                        getAvailableTimeForMerge(app, level).count() * 100;
+                    CLOG_DEBUG(
+                        Perf,
+                        "Bucket merge on level {} finished in {} seconds "
+                        "({}% of available time)",
+                        level, time.count(), timePct);
+                }
 
                 return res;
             }
@@ -394,6 +405,7 @@ void
 FutureBucket::makeLive(Application& app, uint32_t maxProtocolVersion,
                        uint32_t level)
 {
+    ZoneScoped;
     checkState();
     assert(!isLive());
     assert(hasHashes());
@@ -414,7 +426,7 @@ FutureBucket::makeLive(Application& app, uint32_t maxProtocolVersion,
         {
             auto b = bm.getBucketByHash(hexToBin256(h));
             assert(b);
-            CLOG(DEBUG, "Bucket") << "Reconstituting shadow " << h;
+            CLOG_DEBUG(Bucket, "Reconstituting shadow {}", h);
             mInputShadowBuckets.push_back(b);
         }
         mState = FB_LIVE_INPUTS;
@@ -426,6 +438,7 @@ FutureBucket::makeLive(Application& app, uint32_t maxProtocolVersion,
 std::vector<std::string>
 FutureBucket::getHashes() const
 {
+    ZoneScoped;
     std::vector<std::string> hashes;
     if (!mInputCurrBucketHash.empty())
     {

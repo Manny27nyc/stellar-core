@@ -16,7 +16,7 @@
 #include "util/Math.h"
 #include "util/types.h"
 
-#include <util/format.h>
+#include <fmt/format.h>
 
 #include "medida/medida.h"
 #include "medida/reporting/console_reporter.h"
@@ -60,6 +60,16 @@ Simulation::~Simulation()
 
 void
 Simulation::setCurrentVirtualTime(VirtualClock::time_point t)
+{
+    mClock.setCurrentVirtualTime(t);
+    for (auto& p : mNodes)
+    {
+        p.second.mClock->setCurrentVirtualTime(t);
+    }
+}
+
+void
+Simulation::setCurrentVirtualTime(VirtualClock::system_time_point t)
 {
     mClock.setCurrentVirtualTime(t);
     for (auto& p : mNodes)
@@ -455,7 +465,8 @@ Simulation::haveAllExternalized(uint32 num, uint32 maxSpread)
     {
         auto app = it->second.mApp;
         auto n = app->getLedgerManager().getLastClosedLedgerNum();
-        LOG(DEBUG) << app->getConfig().PEER_PORT << " @ ledger#: " << n;
+        LOG_DEBUG(DEFAULT_LOG, "{} @ ledger#: {}", app->getConfig().PEER_PORT,
+                  n);
 
         if (n < min)
             min = n;
@@ -489,9 +500,9 @@ Simulation::crankForAtMost(VirtualClock::duration seconds, bool finalCrank)
         ;
 
     if (stop)
-        LOG(INFO) << "Simulation timed out";
+        LOG_INFO(DEFAULT_LOG, "Simulation timed out");
     else
-        LOG(INFO) << "Simulation complete";
+        LOG_INFO(DEFAULT_LOG, "Simulation complete");
 
     if (finalCrank)
     {
@@ -607,6 +618,14 @@ Simulation::crankUntil(VirtualClock::time_point timePoint, bool finalCrank)
     {
         stopAllNodes();
     }
+}
+
+void
+Simulation::crankUntil(VirtualClock::system_time_point timePoint,
+                       bool finalCrank)
+{
+    crankUntil(VirtualClock::time_point(timePoint.time_since_epoch()),
+               finalCrank);
 }
 
 Config

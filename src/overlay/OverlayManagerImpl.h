@@ -4,7 +4,6 @@
 // under the Apache License, Version 2.0. See the COPYING file at the root
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
-#include "LoadManager.h"
 #include "Peer.h"
 #include "PeerAuth.h"
 #include "PeerDoor.h"
@@ -19,7 +18,8 @@
 #include "util/Logging.h"
 #include "util/Timer.h"
 
-#include "lib/util/lrucache.hpp"
+#include "medida/metrics_registry.h"
+#include "util/RandomEvictionCache.h"
 
 #include <future>
 #include <set>
@@ -78,13 +78,12 @@ class OverlayManagerImpl : public OverlayManager
     PeerManager mPeerManager;
     PeerDoor mDoor;
     PeerAuth mAuth;
-    LoadManager mLoad;
     bool mShuttingDown;
 
     OverlayMetrics mOverlayMetrics;
 
     // NOTE: bool is used here as a placeholder, since no ValueType is needed.
-    cache::lru_cache<uint64_t, bool> mMessageCache;
+    RandomEvictionCache<uint64_t, bool> mMessageCache;
 
     void tick();
     VirtualTimer mTimer;
@@ -100,7 +99,7 @@ class OverlayManagerImpl : public OverlayManager
     OverlayManagerImpl(Application& app);
     ~OverlayManagerImpl();
 
-    void ledgerClosed(uint32_t lastClosedledgerSeq) override;
+    void clearLedgersBelow(uint32_t ledgerSeq, uint32_t lclSeq) override;
     bool recvFloodedMsgID(StellarMessage const& msg, Peer::pointer peer,
                           Hash& msgID) override;
     void forgetFloodedMsg(Hash const& msgID) override;
@@ -139,7 +138,6 @@ class OverlayManagerImpl : public OverlayManager
     OverlayMetrics& getOverlayMetrics() override;
     PeerAuth& getPeerAuth() override;
 
-    LoadManager& getLoadManager() override;
     PeerManager& getPeerManager() override;
 
     SurveyManager& getSurveyManager() override;

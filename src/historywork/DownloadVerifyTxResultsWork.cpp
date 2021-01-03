@@ -9,8 +9,9 @@
 #include "historywork/GetAndUnzipRemoteFileWork.h"
 #include "historywork/Progress.h"
 #include "historywork/VerifyTxResultsWork.h"
-#include "util/format.h"
 #include "work/WorkSequence.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -54,6 +55,7 @@ DownloadVerifyTxResultsWork::resetIter()
 std::shared_ptr<BasicWork>
 DownloadVerifyTxResultsWork::yieldMoreWork()
 {
+    ZoneScoped;
     if (!hasNext())
     {
         throw std::runtime_error("Nothing to iterate over!");
@@ -66,7 +68,8 @@ DownloadVerifyTxResultsWork::yieldMoreWork()
                                                     mCurrCheckpoint);
     std::vector<std::shared_ptr<BasicWork>> seq{w1, w2};
     auto w3 = std::make_shared<WorkSequence>(
-        mApp, "download-verify-results-" + std::to_string(mCurrCheckpoint),
+        mApp,
+        fmt::format(FMT_STRING("download-verify-results-{}"), mCurrCheckpoint),
         seq);
 
     mCurrCheckpoint += mApp.getHistoryManager().getCheckpointFrequency();

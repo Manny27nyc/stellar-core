@@ -12,9 +12,10 @@
 #include "transactions/TransactionUtils.h"
 #include "util/HashOfHash.h"
 #include "util/XDROperators.h"
+#include <Tracy.hpp>
 
 #include <algorithm>
-#include <lib/util/format.h>
+#include <fmt/format.h>
 #include <medida/meter.h>
 #include <medida/metrics_registry.h>
 #include <medida/timer.h>
@@ -43,10 +44,18 @@ TransactionQueue::TransactionQueue(Application& app, int pendingDepth,
         mSizeByAge.emplace_back(&app.getMetrics().NewCounter(
             {"herder", "pending-txs", fmt::format("age{}", i)}));
     }
+
+    auto const& filteredTypes =
+        app.getConfig().EXCLUDE_TRANSACTIONS_CONTAINING_OPERATION_TYPE;
+    mFilteredTypes.insert(filteredTypes.begin(), filteredTypes.end());
 }
 
+// returns true, if a transaction can be replaced by another
+// `minFee` is set when returning false, and is the smallest fee
+// that would allow replace by fee to succeed in this situation
 static bool
-canReplaceByFee(TransactionFrameBasePtr tx, TransactionFrameBasePtr oldTx)
+canReplaceByFee(TransactionFrameBasePtr tx, TransactionFrameBasePtr oldTx,
+                int64_t& minFee)
 {
     int64_t newFee = tx->getFeeBid();
     uint32_t newNumOps = std::max<uint32_t>(1, tx->getNumOperations());
@@ -61,7 +70,16 @@ canReplaceByFee(TransactionFrameBasePtr tx, TransactionFrameBasePtr oldTx)
     // by INT64_MAX, while number of operations and FEE_MULTIPLIER are small.
     auto v1 = bigMultiply(newFee, oldNumOps);
     auto v2 = bigMultiply(oldFee, newNumOps);
-    return v1 >= TransactionQueue::FEE_MULTIPLIER * v2;
+    auto minFeeN = v2 * TransactionQueue::FEE_MULTIPLIER;
+    bool res = v1 >= minFeeN;
+    if (!res)
+    {
+        if (!bigDivide(minFee, minFeeN, int64_t(oldNumOps), Rounding::ROUND_UP))
+        {
+            minFee = INT64_MAX;
+        }
+    }
+    return res;
 }
 
 static bool
@@ -113,9 +131,14 @@ TransactionQueue::canAdd(TransactionFrameBasePtr tx,
                          AccountStates::iterator& stateIter,
                          TimestampedTransactions::iterator& oldTxIter)
 {
+    ZoneScoped;
     if (isBanned(tx->getFullHash()))
     {
         return TransactionQueue::AddResult::ADD_STATUS_TRY_AGAIN_LATER;
+    }
+    if (isFiltered(tx))
+    {
+        return TransactionQueue::AddResult::ADD_STATUS_FILTERED;
     }
 
     int64_t netFee = tx->getFeeBid();
@@ -158,9 +181,11 @@ TransactionQueue::canAdd(TransactionFrameBasePtr tx,
                             ADD_STATUS_DUPLICATE;
                     }
 
-                    if (!canReplaceByFee(tx, oldTxIter->mTx))
+                    int64_t minFee;
+                    if (!canReplaceByFee(tx, oldTxIter->mTx, minFee))
                     {
                         tx->getResult().result.code(txINSUFFICIENT_FEE);
+                        tx->getResult().feeCharged = minFee;
                         return TransactionQueue::AddResult::ADD_STATUS_ERROR;
                     }
 
@@ -185,8 +210,12 @@ TransactionQueue::canAdd(TransactionFrameBasePtr tx,
         return TransactionQueue::AddResult::ADD_STATUS_TRY_AGAIN_LATER;
     }
 
+    auto closeTime = mApp.getLedgerManager()
+                         .getLastClosedLedgerHeader()
+                         .header.scpValue.closeTime;
     LedgerTxn ltx(mApp.getLedgerTxnRoot());
-    if (!tx->checkValid(ltx, seqNum))
+    if (!tx->checkValid(ltx, seqNum, 0,
+                        getUpperBoundCloseTimeOffset(mApp, closeTime)))
     {
         return TransactionQueue::AddResult::ADD_STATUS_ERROR;
     }
@@ -227,6 +256,7 @@ TransactionQueue::releaseFeeMaybeEraseAccountState(TransactionFrameBasePtr tx)
 TransactionQueue::AddResult
 TransactionQueue::tryAdd(TransactionFrameBasePtr tx)
 {
+    ZoneScoped;
     AccountStates::iterator stateIter;
     TimestampedTransactions::iterator oldTxIter;
     auto const res = canAdd(tx, stateIter, oldTxIter);
@@ -266,6 +296,7 @@ TransactionQueue::dropTransactions(AccountStates::iterator stateIter,
                                    TimestampedTransactions::iterator begin,
                                    TimestampedTransactions::iterator end)
 {
+    ZoneScoped;
     // Remove fees and update queue size for each transaction to be dropped.
     // Note releaseFeeMaybeEraseSourceAccount may erase other iterators from
     // mAccountStates, but it will not erase stateIter because it has at least
@@ -299,9 +330,10 @@ TransactionQueue::dropTransactions(AccountStates::iterator stateIter,
 void
 TransactionQueue::removeApplied(Transactions const& appliedTxs)
 {
+    ZoneScoped;
     // Find the highest sequence number that was applied for each source account
     std::map<AccountID, int64_t> seqByAccount;
-    std::unordered_set<Hash> appliedHashes;
+    UnorderedSet<Hash> appliedHashes;
     appliedHashes.reserve(appliedTxs.size());
     for (auto const& tx : appliedTxs)
     {
@@ -393,6 +425,7 @@ findTx(TransactionFrameBasePtr tx,
 void
 TransactionQueue::ban(Transactions const& banTxs)
 {
+    ZoneScoped;
     auto& bannedFront = mBannedTransactions.front();
 
     // Group the transactions by source account and ban all the transactions
@@ -481,6 +514,7 @@ TransactionQueue::getAccountTransactionQueueInfo(
 void
 TransactionQueue::shift()
 {
+    ZoneScoped;
     mBannedTransactions.pop_back();
     mBannedTransactions.emplace_front();
 
@@ -550,7 +584,7 @@ TransactionQueue::isBanned(Hash const& hash) const
 {
     return std::any_of(
         std::begin(mBannedTransactions), std::end(mBannedTransactions),
-        [&](std::unordered_set<Hash> const& transactions) {
+        [&](UnorderedSet<Hash> const& transactions) {
             return transactions.find(hash) != std::end(transactions);
         });
 }
@@ -558,6 +592,7 @@ TransactionQueue::isBanned(Hash const& hash) const
 std::shared_ptr<TxSetFrame>
 TransactionQueue::toTxSet(LedgerHeaderHistoryEntry const& lcl) const
 {
+    ZoneScoped;
     auto result = std::make_shared<TxSetFrame>(lcl.hash);
 
     uint32_t const nextLedgerSeq = lcl.header.ledgerSeq + 1;
@@ -566,17 +601,36 @@ TransactionQueue::toTxSet(LedgerHeaderHistoryEntry const& lcl) const
     {
         for (auto const& tx : m.second.mTransactions)
         {
-            result->add(tx.mTx);
-            // This condition implements the following constraint: there may be
-            // any number of transactions for a given source account, but all
-            // transactions must satisfy one of the following mutually exclusive
-            // conditions
-            // - sequence number <= startingSeq - 1
-            // - sequence number >= startingSeq
-            if (tx.mTx->getSeqNum() == startingSeq - 1)
+            // The previous version of this enforced the following constraint:
+            // there may be any number of transactions for a given source
+            // account, but all transactions for that source account must
+            // satisfy one of the following mutually exclusive conditions
+            // (1) sequence number <= startingSeq - 1
+            // (2) sequence number >= startingSeq
+            //
+            // This version enforces the following constraint: it is forbidden
+            // to include a transaction with
+            //     sequence number == startingSeq
+            // The new condition is strictly stronger. First, note that the
+            // sequence numbers (assuming 0 < k < n, and the source account has
+            // initial number startingSeq - n - 1)
+            //     startingSeq - n, ..., startingSeq - n + k
+            // would be accepted by the new condition and by condition (1)
+            // above. Second, note that the sequence numbers (assuming 0 < k,
+            // 0 < n, and the source account has initial sequence number
+            // startingSeq + n - 1)
+            //     startingSeq + n, ..., startingSeq + n + k
+            // would be accepted by the new condition and by condition (2)
+            // above. These are the only sequence numbers that would be accepted
+            // by the new condition. But the old condition would also accept
+            // (assuming 0 < k, and the source account has initial sequence
+            // number startingSeq - 1)
+            //     startingSeq, ..., startingSeq + k .
+            if (tx.mTx->getSeqNum() == startingSeq)
             {
                 break;
             }
+            result->add(tx.mTx);
         }
     }
 
@@ -629,5 +683,42 @@ TransactionQueue::maxQueueSizeOps() const
     size_t maxOpsLedger = mApp.getLedgerManager().getLastMaxTxSetSizeOps();
     maxOpsLedger *= mPoolLedgerMultiplier;
     return maxOpsLedger;
+}
+
+static bool
+containsFilteredOperation(std::vector<Operation> const& ops,
+                          UnorderedSet<OperationType> const& filteredTypes)
+{
+    return std::any_of(ops.begin(), ops.end(), [&](auto const& op) {
+        return filteredTypes.find(op.body.type()) != filteredTypes.end();
+    });
+}
+
+bool
+TransactionQueue::isFiltered(TransactionFrameBasePtr tx) const
+{
+    // Avoid cost of checking if filtering is not in use
+    if (mFilteredTypes.empty())
+    {
+        return false;
+    }
+
+    switch (tx->getEnvelope().type())
+    {
+    case ENVELOPE_TYPE_TX_V0:
+        return containsFilteredOperation(tx->getEnvelope().v0().tx.operations,
+                                         mFilteredTypes);
+    case ENVELOPE_TYPE_TX:
+        return containsFilteredOperation(tx->getEnvelope().v1().tx.operations,
+                                         mFilteredTypes);
+    case ENVELOPE_TYPE_TX_FEE_BUMP:
+    {
+        auto const& envelope = tx->getEnvelope().feeBump().tx.innerTx.v1();
+        return containsFilteredOperation(envelope.tx.operations,
+                                         mFilteredTypes);
+    }
+    default:
+        abort();
+    }
 }
 }

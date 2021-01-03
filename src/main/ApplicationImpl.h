@@ -10,6 +10,8 @@
 #include "medida/timer_context.h"
 #include "util/MetricResetter.h"
 #include "util/Timer.h"
+#include "util/optional.h"
+#include "xdr/Stellar-ledger-entries.h"
 #include <thread>
 
 namespace medida
@@ -74,9 +76,8 @@ class ApplicationImpl : public Application
     virtual StatusManager& getStatusManager() override;
 
     virtual asio::io_context& getWorkerIOContext() override;
-    virtual void
-    postOnMainThread(std::function<void()>&& f,
-                     VirtualClock::ExecutionCategory&& jobID) override;
+    virtual void postOnMainThread(std::function<void()>&& f, std::string&& name,
+                                  Scheduler::ActionType type) override;
     virtual void postOnBackgroundThread(std::function<void()>&& f,
                                         std::string jobName) override;
 
@@ -93,12 +94,16 @@ class ApplicationImpl : public Application
     // returns.
     virtual void joinAllThreads() override;
 
-    virtual bool manualClose() override;
+    virtual std::string
+    manualClose(optional<uint32_t> const& manualLedgerSeq,
+                optional<TimePoint> const& manualCloseTime) override;
 
 #ifdef BUILD_TESTS
     virtual void generateLoad(bool isCreate, uint32_t nAccounts,
                               uint32_t offset, uint32_t nTxs, uint32_t txRate,
-                              uint32_t batchSize) override;
+                              uint32_t batchSize,
+                              std::chrono::seconds spikeInterval,
+                              uint32_t spikeSize) override;
 
     virtual LoadGenerator& getLoadGenerator() override;
 #endif
@@ -185,7 +190,7 @@ class ApplicationImpl : public Application
     medida::Counter& mAppStateCurrent;
     medida::Timer& mPostOnMainThreadDelay;
     medida::Timer& mPostOnBackgroundThreadDelay;
-    VirtualClock::time_point mStartedOn;
+    VirtualClock::system_time_point mStartedOn;
 
     Hash mNetworkID;
 
@@ -201,5 +206,15 @@ class ApplicationImpl : public Application
     virtual std::unique_ptr<InvariantManager> createInvariantManager();
     virtual std::unique_ptr<OverlayManager> createOverlayManager();
     virtual std::unique_ptr<LedgerManager> createLedgerManager();
+    virtual std::unique_ptr<Database> createDatabase();
+
+    uint32_t targetManualCloseLedgerSeqNum(
+        optional<uint32_t> const& explicitlyProvidedSeqNum);
+
+    void setManualCloseVirtualTime(
+        optional<TimePoint> const& explicitlyProvidedCloseTime);
+
+    void
+    advanceToLedgerBeforeManualCloseTarget(uint32_t const& targetLedgerSeq);
 };
 }

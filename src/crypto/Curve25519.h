@@ -6,14 +6,13 @@
 
 #include "ByteSlice.h"
 #include "util/Logging.h"
-#include "util/format.h"
 #include "xdr/Stellar-types.h"
+#include <fmt/format.h>
 #include <functional>
 #include <sodium.h>
 
 namespace stellar
 {
-
 // This module contains functions for doing ECDH on Curve25519. Despite the
 // equivalence between this curve and Ed25519 (used in signatures, see
 // SecretKey.h) we use Curve25519 keys _only_ for ECDH shared-key-agreement

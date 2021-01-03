@@ -10,6 +10,7 @@
 #include "util/Fs.h"
 #include "util/Logging.h"
 #include "xdrpp/marshal.h"
+#include <Tracy.hpp>
 
 #include <fstream>
 #include <string>
@@ -41,12 +42,14 @@ class XDRInputFileStream
     void
     close()
     {
+        ZoneScoped;
         mIn.close();
     }
 
     void
     open(std::string const& filename)
     {
+        ZoneScoped;
         mIn.open(filename, std::ifstream::binary);
         if (!mIn)
         {
@@ -54,10 +57,10 @@ class XDRInputFileStream
             msg += filename;
             msg += ", reason: ";
             msg += std::to_string(errno);
-            CLOG(ERROR, "Fs") << msg;
+            CLOG_ERROR(Fs, "{}", msg);
             throw FileSystemException(msg);
         }
-
+        mIn.exceptions(std::ios::badbit);
         mSize = fs::size(mIn);
     }
 
@@ -84,6 +87,7 @@ class XDRInputFileStream
     bool
     readOne(T& out)
     {
+        ZoneScoped;
         char szBuf[4];
         if (!mIn.read(szBuf, 4))
         {
@@ -119,7 +123,7 @@ class XDRInputFileStream
     }
 };
 
-// XDROutputStream needs access to a file descriptor to do fsync, so we use
+// XDROutputFileStream needs access to a file descriptor to do fsync, so we use
 // asio's synchronous stream types here rather than fstreams.
 class XDROutputFileStream
 {
@@ -176,6 +180,7 @@ class XDROutputFileStream
     void
     close()
     {
+        ZoneScoped;
         if (!isOpen())
         {
             FileSystemException::failWith(
@@ -220,6 +225,7 @@ class XDROutputFileStream
     void
     flush()
     {
+        ZoneScoped;
         if (!isOpen())
         {
             FileSystemException::failWith(
@@ -248,6 +254,7 @@ class XDROutputFileStream
     void
     open(std::string const& filename)
     {
+        ZoneScoped;
         mUsingRandomAccessHandle = fs::shouldUseRandomAccessHandle(filename);
         if (isOpen())
         {
@@ -275,6 +282,7 @@ class XDROutputFileStream
     void
     writeOne(T const& t, SHA256* hasher = nullptr, size_t* bytesPut = nullptr)
     {
+        ZoneScoped;
         if (!isOpen())
         {
             FileSystemException::failWith(

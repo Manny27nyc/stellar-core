@@ -10,8 +10,9 @@
 #include "main/ErrorMessages.h"
 #include "util/Fs.h"
 #include "util/Logging.h"
-#include "util/format.h"
+#include <fmt/format.h>
 
+#include <Tracy.hpp>
 #include <medida/meter.h>
 #include <medida/metrics_registry.h>
 
@@ -22,11 +23,12 @@ namespace stellar
 
 VerifyBucketWork::VerifyBucketWork(
     Application& app, std::map<std::string, std::shared_ptr<Bucket>>& buckets,
-    std::string const& bucketFile, uint256 const& hash)
+    std::string const& bucketFile, uint256 const& hash, OnFailureCallback cb)
     : BasicWork(app, "verify-bucket-hash-" + bucketFile, BasicWork::RETRY_NEVER)
     , mBuckets(buckets)
     , mBucketFile(bucketFile)
     , mHash(hash)
+    , mOnFailure(cb)
     , mVerifyBucketSuccess(app.getMetrics().NewMeter(
           {"history", "verify-bucket", "success"}, "event"))
     , mVerifyBucketFailure(app.getMetrics().NewMeter(
@@ -37,6 +39,7 @@ VerifyBucketWork::VerifyBucketWork(
 BasicWork::State
 VerifyBucketWork::onRun()
 {
+    ZoneScoped;
     if (mDone)
     {
         if (mEc)
@@ -57,6 +60,7 @@ VerifyBucketWork::onRun()
 void
 VerifyBucketWork::adoptBucket()
 {
+    ZoneScoped;
     assert(mDone);
     assert(!mEc);
 
@@ -76,39 +80,48 @@ VerifyBucketWork::spawnVerifier()
         std::static_pointer_cast<VerifyBucketWork>(shared_from_this()));
     app.postOnBackgroundThread(
         [&app, filename, weak, hash]() {
-            auto hasher = SHA256::create();
+            SHA256 hasher;
             asio::error_code ec;
+            try
             {
-                CLOG(INFO, "History")
-                    << fmt::format("Verifying bucket {}", binToHex(hash));
+                ZoneNamedN(verifyZone, "bucket verify", true);
+                CLOG_INFO(History, "Verifying bucket {}", binToHex(hash));
 
                 // ensure that the stream gets its own scope to avoid race with
                 // main thread
                 std::ifstream in(filename, std::ifstream::binary);
+                if (!in)
+                {
+                    throw std::runtime_error(
+                        fmt::format("Error opening file {}", filename));
+                }
+                in.exceptions(std::ios::badbit);
                 char buf[4096];
                 while (in)
                 {
                     in.read(buf, sizeof(buf));
-                    hasher->add(ByteSlice(buf, in.gcount()));
+                    hasher.add(ByteSlice(buf, in.gcount()));
                 }
-                uint256 vHash = hasher->finish();
+                uint256 vHash = hasher.finish();
                 if (vHash == hash)
                 {
-                    CLOG(DEBUG, "History")
-                        << "Verified hash (" << hexAbbrev(hash) << ") for "
-                        << filename;
+                    CLOG_DEBUG(History, "Verified hash ({}) for {}",
+                               hexAbbrev(hash), filename);
                 }
                 else
                 {
-                    CLOG(WARNING, "History")
-                        << "FAILED verifying hash for " << filename;
-                    CLOG(WARNING, "History")
-                        << "expected hash: " << binToHex(hash);
-                    CLOG(WARNING, "History")
-                        << "computed hash: " << binToHex(vHash);
-                    CLOG(WARNING, "History") << POSSIBLY_CORRUPTED_HISTORY;
+                    CLOG_WARNING(History, "FAILED verifying hash for {}",
+                                 filename);
+                    CLOG_WARNING(History, "expected hash: {}", binToHex(hash));
+                    CLOG_WARNING(History, "computed hash: {}", binToHex(vHash));
+                    CLOG_WARNING(History, "{}", POSSIBLY_CORRUPTED_HISTORY);
                     ec = std::make_error_code(std::errc::io_error);
                 }
+            }
+            catch (std::exception const& e)
+            {
+                CLOG_WARNING(History, "Failed verification : {}", e.what());
+                ec = std::make_error_code(std::errc::io_error);
             }
 
             // Not ideal, but needed to prevent race conditions with
@@ -124,9 +137,17 @@ VerifyBucketWork::spawnVerifier()
                         self->wakeUp();
                     }
                 },
-                {VirtualClock::ExecutionCategory::Type::NORMAL_EVENT,
-                 "VerifyBucket: finish"});
+                "VerifyBucket: finish");
         },
         "VerifyBucket: start in background");
+}
+
+void
+VerifyBucketWork::onFailureRaise()
+{
+    if (mOnFailure)
+    {
+        mOnFailure();
+    }
 }
 }

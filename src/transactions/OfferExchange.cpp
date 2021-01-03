@@ -10,8 +10,10 @@
 #include "ledger/LedgerTxnHeader.h"
 #include "ledger/TrustLineWrapper.h"
 #include "lib/util/uint128_t.h"
+#include "transactions/SponsorshipUtils.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Logging.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -112,6 +114,7 @@ ExchangeResult
 exchangeV2(int64_t wheatReceived, Price price, int64_t maxWheatReceive,
            int64_t maxSheepSend)
 {
+    ZoneScoped;
     auto result = ExchangeResult{};
     result.reduced = wheatReceived > maxWheatReceive;
     wheatReceived = std::min(wheatReceived, maxWheatReceive);
@@ -136,6 +139,7 @@ ExchangeResult
 exchangeV3(int64_t wheatReceived, Price price, int64_t maxWheatReceive,
            int64_t maxSheepSend)
 {
+    ZoneScoped;
     auto result = ExchangeResult{};
     result.reduced = wheatReceived > maxWheatReceive;
     result.numWheatReceived = std::min(wheatReceived, maxWheatReceive);
@@ -539,6 +543,7 @@ ExchangeResultV10
 exchangeV10(Price price, int64_t maxWheatSend, int64_t maxWheatReceive,
             int64_t maxSheepSend, int64_t maxSheepReceive, RoundingType round)
 {
+    ZoneScoped;
     auto beforeThresholds = exchangeV10WithoutPriceErrorThresholds(
         price, maxWheatSend, maxWheatReceive, maxSheepSend, maxSheepReceive,
         round);
@@ -903,6 +908,7 @@ adjustOffer(LedgerTxnHeader const& header, LedgerTxnEntry& offer,
 int64_t
 adjustOffer(Price const& price, int64_t maxWheatSend, int64_t maxSheepReceive)
 {
+    ZoneScoped;
     auto res = exchangeV10(price, maxWheatSend, INT64_MAX, INT64_MAX,
                            maxSheepReceive, RoundingType::NORMAL);
     return res.numWheatReceived;
@@ -917,6 +923,7 @@ performExchange(LedgerTxnHeader const& header,
                 int64_t maxWheatReceived, int64_t& numWheatReceived,
                 int64_t maxSheepSend, int64_t& numSheepSend, int64_t& newAmount)
 {
+    ZoneScoped;
     auto const& offer = sellingWheatOffer.current().data.offer();
     Asset const& sheep = offer.buying;
     Asset const& wheat = offer.selling;
@@ -964,6 +971,7 @@ crossOffer(AbstractLedgerTxn& ltx, LedgerTxnEntry& sellingWheatOffer,
            int64_t maxSheepSend, int64_t& numSheepSend,
            std::vector<ClaimOfferAtom>& offerTrail)
 {
+    ZoneScoped;
     assert(maxWheatReceived > 0);
     assert(maxSheepSend > 0);
 
@@ -1002,9 +1010,10 @@ crossOffer(AbstractLedgerTxn& ltx, LedgerTxnEntry& sellingWheatOffer,
     // Note: No changes have been stored before this point.
     if (newAmount == 0)
     { // entire offer is taken
-        sellingWheatOffer.erase();
         auto accountB = stellar::loadAccount(ltx, accountBID);
-        addNumEntries(ltx.loadHeader(), accountB, -1);
+        removeEntryWithPossibleSponsorship(
+            ltx, ltx.loadHeader(), sellingWheatOffer.current(), accountB);
+        sellingWheatOffer.erase();
     }
     else
     {
@@ -1080,6 +1089,7 @@ crossOfferV10(AbstractLedgerTxn& ltx, LedgerTxnEntry& sellingWheatOffer,
               int64_t maxSheepSend, int64_t& numSheepSend, bool& wheatStays,
               RoundingType round, std::vector<ClaimOfferAtom>& offerTrail)
 {
+    ZoneScoped;
     assert(maxWheatReceived > 0);
     assert(maxSheepSend > 0);
     auto header = ltx.loadHeader();
@@ -1184,9 +1194,10 @@ crossOfferV10(AbstractLedgerTxn& ltx, LedgerTxnEntry& sellingWheatOffer,
         sellingWheatOffer = loadOffer(ltxInner, accountBID, offerID);
         if (res == CrossOfferResult::eOfferTaken)
         {
+            auto account = loadAccount(ltxInner, accountBID);
+            removeEntryWithPossibleSponsorship(
+                ltxInner, header, sellingWheatOffer.current(), account);
             sellingWheatOffer.erase();
-            accountB = stellar::loadAccount(ltxInner, accountBID);
-            addNumEntries(header, accountB, -1);
         }
         else
         {
@@ -1212,6 +1223,12 @@ convertWithOffers(
     std::function<OfferFilterResult(LedgerTxnEntry const&)> filter,
     std::vector<ClaimOfferAtom>& offerTrail, int64_t maxOffersToCross)
 {
+    ZoneScoped;
+    std::string pairStr = assetToString(sheep);
+    pairStr += ":";
+    pairStr += assetToString(wheat);
+    ZoneText(pairStr.c_str(), pairStr.size());
+
     // If offerTrail is not empty at the start, then the limit maxOffersToCross
     // will not be imposed correctly.
     assert(offerTrail.empty());

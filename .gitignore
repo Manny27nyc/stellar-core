@@ -30,6 +30,8 @@ compile_commands.json
 *~
 *.swp
 **/.vscode/*
+.idea
+.clangd
 
 .libs
 .deps
@@ -76,7 +78,8 @@ compile_commands.json
 /scripts/*.json
 
 # test output
-/stellar-core-test-*
+stellar-core-test-*
+test-partitions.*
 /fuzz-findings/
 /my-history/
 

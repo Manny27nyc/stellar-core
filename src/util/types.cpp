@@ -3,9 +3,9 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "util/types.h"
-#include "lib/util/format.h"
 #include "lib/util/uint128_t.h"
 #include "util/XDROperators.h"
+#include <fmt/format.h>
 
 #include <algorithm>
 #include <limits>
@@ -18,32 +18,34 @@ LedgerKey
 LedgerEntryKey(LedgerEntry const& e)
 {
     auto& d = e.data;
-    LedgerKey k;
+    LedgerKey k(d.type());
     switch (d.type())
     {
-
     case ACCOUNT:
-        k.type(ACCOUNT);
         k.account().accountID = d.account().accountID;
         break;
 
     case TRUSTLINE:
-        k.type(TRUSTLINE);
         k.trustLine().accountID = d.trustLine().accountID;
         k.trustLine().asset = d.trustLine().asset;
         break;
 
     case OFFER:
-        k.type(OFFER);
         k.offer().sellerID = d.offer().sellerID;
         k.offer().offerID = d.offer().offerID;
         break;
 
     case DATA:
-        k.type(DATA);
         k.data().accountID = d.data().accountID;
         k.data().dataName = d.data().dataName;
         break;
+
+    case CLAIMABLE_BALANCE:
+        k.claimableBalance().balanceID = d.claimableBalance().balanceID;
+        break;
+
+    default:
+        abort();
     }
     return k;
 }

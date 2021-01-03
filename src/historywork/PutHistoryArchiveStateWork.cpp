@@ -8,6 +8,7 @@
 #include "historywork/PutRemoteFileWork.h"
 #include "main/ErrorMessages.h"
 #include "util/Logging.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -38,6 +39,7 @@ PutHistoryArchiveStateWork::doReset()
 BasicWork::State
 PutHistoryArchiveStateWork::doWork()
 {
+    ZoneScoped;
     if (!mPutRemoteFileWork)
     {
         try
@@ -48,9 +50,8 @@ PutHistoryArchiveStateWork::doWork()
         }
         catch (std::runtime_error& e)
         {
-            CLOG(ERROR, "History")
-                << "Error saving history state: " << e.what();
-            CLOG(ERROR, "History") << POSSIBLY_CORRUPTED_LOCAL_FS;
+            CLOG_ERROR(History, "Error saving history state: {}", e.what());
+            CLOG_ERROR(History, "{}", POSSIBLY_CORRUPTED_LOCAL_FS);
             return State::WORK_FAILURE;
         }
     }
@@ -63,6 +64,7 @@ PutHistoryArchiveStateWork::doWork()
 void
 PutHistoryArchiveStateWork::spawnPublishWork()
 {
+    ZoneScoped;
     // Put the file in the history/ww/xx/yy/history-wwxxyyzz.json file
     auto seqName = HistoryArchiveState::remoteName(mState.currentLedger);
     auto seqDir = HistoryArchiveState::remoteDir(mState.currentLedger);

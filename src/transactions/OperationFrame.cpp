@@ -4,10 +4,14 @@
 
 #include "transactions/OperationFrame.h"
 #include "transactions/AllowTrustOpFrame.h"
+#include "transactions/BeginSponsoringFutureReservesOpFrame.h"
 #include "transactions/BumpSequenceOpFrame.h"
 #include "transactions/ChangeTrustOpFrame.h"
+#include "transactions/ClaimClaimableBalanceOpFrame.h"
 #include "transactions/CreateAccountOpFrame.h"
+#include "transactions/CreateClaimableBalanceOpFrame.h"
 #include "transactions/CreatePassiveSellOfferOpFrame.h"
+#include "transactions/EndSponsoringFutureReservesOpFrame.h"
 #include "transactions/InflationOpFrame.h"
 #include "transactions/ManageBuyOfferOpFrame.h"
 #include "transactions/ManageDataOpFrame.h"
@@ -16,12 +20,13 @@
 #include "transactions/PathPaymentStrictReceiveOpFrame.h"
 #include "transactions/PathPaymentStrictSendOpFrame.h"
 #include "transactions/PaymentOpFrame.h"
+#include "transactions/RevokeSponsorshipOpFrame.h"
 #include "transactions/SetOptionsOpFrame.h"
 #include "transactions/TransactionFrame.h"
 #include "transactions/TransactionUtils.h"
 #include "util/Logging.h"
-
-#include <xdrpp/printer.h>
+#include "util/XDRCereal.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -47,7 +52,7 @@ getNeededThreshold(LedgerTxnEntry const& account, ThresholdLevel const level)
 
 shared_ptr<OperationFrame>
 OperationFrame::makeHelper(Operation const& op, OperationResult& res,
-                           TransactionFrame& tx)
+                           TransactionFrame& tx, uint32_t index)
 {
     switch (op.body.type())
     {
@@ -79,6 +84,19 @@ OperationFrame::makeHelper(Operation const& op, OperationResult& res,
         return std::make_shared<ManageBuyOfferOpFrame>(op, res, tx);
     case PATH_PAYMENT_STRICT_SEND:
         return std::make_shared<PathPaymentStrictSendOpFrame>(op, res, tx);
+    case CREATE_CLAIMABLE_BALANCE:
+        return std::make_shared<CreateClaimableBalanceOpFrame>(op, res, tx,
+                                                               index);
+    case CLAIM_CLAIMABLE_BALANCE:
+        return std::make_shared<ClaimClaimableBalanceOpFrame>(op, res, tx);
+    case BEGIN_SPONSORING_FUTURE_RESERVES:
+        return std::make_shared<BeginSponsoringFutureReservesOpFrame>(op, res,
+                                                                      tx);
+    case END_SPONSORING_FUTURE_RESERVES:
+        return std::make_shared<EndSponsoringFutureReservesOpFrame>(op, res,
+                                                                    tx);
+    case REVOKE_SPONSORSHIP:
+        return std::make_shared<RevokeSponsorshipOpFrame>(op, res, tx);
     default:
         ostringstream err;
         err << "Unknown Tx type: " << op.body.type();
@@ -90,16 +108,18 @@ OperationFrame::OperationFrame(Operation const& op, OperationResult& res,
                                TransactionFrame& parentTx)
     : mOperation(op), mParentTx(parentTx), mResult(res)
 {
+    resetResultSuccess();
 }
 
 bool
 OperationFrame::apply(SignatureChecker& signatureChecker,
                       AbstractLedgerTxn& ltx)
 {
+    ZoneScoped;
     bool res;
     if (Logging::logTrace("Tx"))
     {
-        CLOG(TRACE, "Tx") << "Operation: " << xdr::xdr_to_string(mOperation);
+        CLOG_TRACE(Tx, "Operation: {}", xdr_to_string(mOperation));
     }
     res = checkValid(signatureChecker, ltx, true);
     if (res)
@@ -107,8 +127,7 @@ OperationFrame::apply(SignatureChecker& signatureChecker,
         res = doApply(ltx);
         if (Logging::logTrace("Tx"))
         {
-            CLOG(TRACE, "Tx")
-                << "Operation result: " << xdr::xdr_to_string(mResult);
+            CLOG_TRACE(Tx, "Operation result: {}", xdr_to_string(mResult));
         }
     }
 
@@ -130,6 +149,7 @@ bool
 OperationFrame::checkSignature(SignatureChecker& signatureChecker,
                                AbstractLedgerTxn& ltx, bool forApply)
 {
+    ZoneScoped;
     auto header = ltx.loadHeader();
     auto sourceAccount = loadSourceAccount(ltx, header);
     if (sourceAccount)
@@ -183,6 +203,7 @@ bool
 OperationFrame::checkValid(SignatureChecker& signatureChecker,
                            AbstractLedgerTxn& ltxOuter, bool forApply)
 {
+    ZoneScoped;
     // Note: ltx is always rolled back so checkValid never modifies the ledger
     LedgerTxn ltx(ltxOuter);
     auto ledgerVersion = ltx.loadHeader().current().ledgerVersion;
@@ -210,8 +231,7 @@ OperationFrame::checkValid(SignatureChecker& signatureChecker,
         }
     }
 
-    mResult.code(opINNER);
-    mResult.tr().type(mOperation.body.type());
+    resetResultSuccess();
 
     return doCheckValid(ledgerVersion);
 }
@@ -220,12 +240,19 @@ LedgerTxnEntry
 OperationFrame::loadSourceAccount(AbstractLedgerTxn& ltx,
                                   LedgerTxnHeader const& header)
 {
+    ZoneScoped;
     return mParentTx.loadAccount(ltx, header, getSourceID());
 }
 
 void
-OperationFrame::insertLedgerKeysToPrefetch(
-    std::unordered_set<LedgerKey>& keys) const
+OperationFrame::resetResultSuccess()
+{
+    mResult.code(opINNER);
+    mResult.tr().type(mOperation.body.type());
+}
+
+void
+OperationFrame::insertLedgerKeysToPrefetch(UnorderedSet<LedgerKey>& keys) const
 {
     // Do nothing by default
     return;

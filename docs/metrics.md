@@ -95,6 +95,7 @@ overlay.memory.flood-known               | counter   | number of known flooded e
 overlay.message.broadcast                | meter     | message broadcasted
 overlay.message.read                     | meter     | message received
 overlay.message.write                    | meter     | message sent
+overlay.message.drop                     | meter     | message dropped due to load-shedding
 overlay.outbound.attempt                 | meter     | outbound connection attempted (socket opened)
 overlay.outbound.cancel                  | meter     | outbound connection cancelled
 overlay.outbound.drop                    | meter     | outbound connection dropped
@@ -106,7 +107,8 @@ overlay.recv.survey-request              | timer     | time spent in processing 
 overlay.recv.survey-response             | timer     | time spent in processing survey response
 overlay.send.survey-request              | meter     | sent survey request
 overlay.send.survey-response             | meter     | sent survey response
-process.ioservice.queue                  | counter   | number of items waiting in internal queue
+process.action.queue                     | counter   | number of items waiting in internal action-queue
+process.action.overloaded                | counter   | 0-or-1 value indicating action-queue overloading
 scp.envelope.emit                        | meter     | SCP message sent
 scp.envelope.invalidsig                  | meter     | envelope failed signature verification
 scp.envelope.receive                     | meter     | SCP message received

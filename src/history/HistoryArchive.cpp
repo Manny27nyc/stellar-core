@@ -13,12 +13,13 @@
 #include "crypto/Hex.h"
 #include "crypto/SHA.h"
 #include "history/HistoryManager.h"
-#include "lib/util/format.h"
 #include "main/Application.h"
 #include "main/StellarCoreVersion.h"
 #include "process/ProcessManager.h"
 #include "util/Fs.h"
 #include "util/Logging.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 #include <cereal/archives/json.hpp>
 #include <cereal/cereal.hpp>
@@ -45,12 +46,11 @@ formatString(std::string const& templateString, Tokens const&... tokens)
     {
         return fmt::format(templateString, tokens...);
     }
-    catch (fmt::FormatError const& ex)
+    catch (fmt::format_error const& ex)
     {
-        CLOG(ERROR, "History") << "Failed to format string \"" << templateString
-                               << "\":" << ex.what();
-        CLOG(ERROR, "History")
-            << "Check your HISTORY entry in configuration file";
+        CLOG_ERROR(History, "Failed to format string \"{}\":{}", templateString,
+                   ex.what());
+        CLOG_ERROR(History, "Check your HISTORY entry in configuration file");
         throw std::runtime_error("failed to format command string");
     }
 }
@@ -58,6 +58,7 @@ formatString(std::string const& templateString, Tokens const&... tokens)
 bool
 HistoryArchiveState::futuresAllResolved() const
 {
+    ZoneScoped;
     for (auto const& level : currentBuckets)
     {
         if (level.next.isMerging())
@@ -79,6 +80,7 @@ HistoryArchiveState::futuresAllClear() const
 void
 HistoryArchiveState::resolveAllFutures()
 {
+    ZoneScoped;
     for (auto& level : currentBuckets)
     {
         if (level.next.isMerging())
@@ -91,6 +93,7 @@ HistoryArchiveState::resolveAllFutures()
 void
 HistoryArchiveState::resolveAnyReadyFutures()
 {
+    ZoneScoped;
     for (auto& level : currentBuckets)
     {
         if (level.next.isMerging() && level.next.mergeComplete())
@@ -103,7 +106,10 @@ HistoryArchiveState::resolveAnyReadyFutures()
 void
 HistoryArchiveState::save(std::string const& outFile) const
 {
-    std::ofstream out(outFile);
+    ZoneScoped;
+    std::ofstream out;
+    out.exceptions(std::ios::failbit | std::ios::badbit);
+    out.open(outFile);
     cereal::JSONOutputArchive ar(out);
     serialize(ar);
 }
@@ -111,6 +117,7 @@ HistoryArchiveState::save(std::string const& outFile) const
 std::string
 HistoryArchiveState::toString() const
 {
+    ZoneScoped;
     // We serialize-to-a-string any HAS, regardless of resolvedness, as we are
     // usually doing this to write to the database on the main thread, just as a
     // durability step: we don't want to block.
@@ -125,13 +132,19 @@ HistoryArchiveState::toString() const
 void
 HistoryArchiveState::load(std::string const& inFile)
 {
+    ZoneScoped;
     std::ifstream in(inFile);
+    if (!in)
+    {
+        throw std::runtime_error(fmt::format("Error opening file {}", inFile));
+    }
+    in.exceptions(std::ios::badbit);
     cereal::JSONInputArchive ar(in);
     serialize(ar);
     if (version != HISTORY_ARCHIVE_STATE_VERSION)
     {
-        CLOG(ERROR, "History")
-            << "Unexpected history archive state version: " << version;
+        CLOG_ERROR(History, "Unexpected history archive state version: {}",
+                   version);
         throw std::runtime_error("unexpected history archive state version");
     }
 }
@@ -139,6 +152,7 @@ HistoryArchiveState::load(std::string const& inFile)
 void
 HistoryArchiveState::fromString(std::string const& str)
 {
+    ZoneScoped;
     std::istringstream in(str);
     cereal::JSONInputArchive ar(in);
     serialize(ar);
@@ -185,6 +199,7 @@ HistoryArchiveState::localName(Application& app, std::string const& archiveName)
 Hash
 HistoryArchiveState::getBucketListHash() const
 {
+    ZoneScoped;
     // NB: This hash algorithm has to match "what the BucketList does" to
     // calculate its BucketList hash exactly. It's not a particularly complex
     // algorithm -- just hash all the hashes of all the bucket levels, in order,
@@ -194,20 +209,21 @@ HistoryArchiveState::getBucketListHash() const
     // relatively-different representations. Everything will explode if there is
     // any difference in these algorithms anyways, so..
 
-    auto totalHash = SHA256::create();
+    SHA256 totalHash;
     for (auto const& level : currentBuckets)
     {
-        auto levelHash = SHA256::create();
-        levelHash->add(hexToBin(level.curr));
-        levelHash->add(hexToBin(level.snap));
-        totalHash->add(levelHash->finish());
+        SHA256 levelHash;
+        levelHash.add(hexToBin(level.curr));
+        levelHash.add(hexToBin(level.snap));
+        totalHash.add(levelHash.finish());
     }
-    return totalHash->finish();
+    return totalHash.finish();
 }
 
 std::vector<std::string>
 HistoryArchiveState::differingBuckets(HistoryArchiveState const& other) const
 {
+    ZoneScoped;
     assert(futuresAllResolved());
     std::set<std::string> inhibit;
     uint256 zero;
@@ -251,6 +267,7 @@ HistoryArchiveState::differingBuckets(HistoryArchiveState const& other) const
 std::vector<std::string>
 HistoryArchiveState::allBuckets() const
 {
+    ZoneScoped;
     std::set<std::string> buckets;
     for (auto const& level : currentBuckets)
     {
@@ -265,6 +282,7 @@ HistoryArchiveState::allBuckets() const
 bool
 HistoryArchiveState::containsValidBuckets(Application& app) const
 {
+    ZoneScoped;
     // This function assumes presence of required buckets to verify state
     // Level 0 future buckets are always clear
     assert(currentBuckets[0].next.isClear());
@@ -287,15 +305,14 @@ HistoryArchiveState::containsValidBuckets(Application& app) const
         {
             if (!level.next.isClear())
             {
-                CLOG(ERROR, "History")
-                    << "Invalid HAS: future must be cleared ";
+                CLOG_ERROR(History, "Invalid HAS: future must be cleared ");
                 return false;
             }
         }
         else if (!level.next.hasOutputHash())
         {
-            CLOG(ERROR, "History")
-                << "Invalid HAS: future must have resolved output";
+            CLOG_ERROR(History,
+                       "Invalid HAS: future must have resolved output");
             return false;
         }
     }
@@ -305,6 +322,7 @@ HistoryArchiveState::containsValidBuckets(Application& app) const
 void
 HistoryArchiveState::prepareForPublish(Application& app)
 {
+    ZoneScoped;
     // Level 0 future buckets are always clear
     assert(currentBuckets[0].next.isClear());
 
@@ -353,8 +371,11 @@ HistoryArchiveState::HistoryArchiveState() : server(STELLAR_CORE_VERSION)
 }
 
 HistoryArchiveState::HistoryArchiveState(uint32_t ledgerSeq,
-                                         BucketList const& buckets)
-    : server(STELLAR_CORE_VERSION), currentLedger(ledgerSeq)
+                                         BucketList const& buckets,
+                                         std::string const& passphrase)
+    : server(STELLAR_CORE_VERSION)
+    , networkPassphrase(passphrase)
+    , currentLedger(ledgerSeq)
 {
     for (uint32_t i = 0; i < BucketList::kNumLevels; ++i)
     {

@@ -148,12 +148,12 @@ BucketOutputIteratorForTesting::writeTmpTestBucket()
 
     // Finish writing and close the bucket file
     REQUIRE(mBuf);
-    mOut.writeOne(*mBuf, mHasher.get(), &mBytesPut);
+    mOut.writeOne(*mBuf, &mHasher, &mBytesPut);
     mObjectsPut++;
     mBuf.reset();
     mOut.close();
 
-    return std::pair<std::string, uint256>(mFilename, mHasher->finish());
+    return std::pair<std::string, uint256>(mFilename, mHasher.finish());
 };
 
 TestBucketGenerator::TestBucketGenerator(
@@ -204,7 +204,9 @@ TestBucketGenerator::generateBucket(TestBucketState state)
         }
         else
         {
-            std::ofstream out(filename + ".gz");
+            std::ofstream out;
+            out.exceptions(std::ios::failbit | std::ios::badbit);
+            out.open(filename + ".gz");
             out.close();
             seq = {mkdir, put};
         }
@@ -301,29 +303,29 @@ TestLedgerChainGenerator::makeLedgerChainFiles(
 
 CatchupMetrics::CatchupMetrics()
     : mHistoryArchiveStatesDownloaded{0}
-    , mLedgersDownloaded{0}
+    , mCheckpointsDownloaded{0}
     , mLedgersVerified{0}
     , mLedgerChainsVerificationFailed{0}
     , mBucketsDownloaded{false}
     , mBucketsApplied{false}
-    , mTransactionsDownloaded{0}
-    , mTransactionsApplied{0}
+    , mTxSetsDownloaded{0}
+    , mTxSetsApplied{0}
 {
 }
 
 CatchupMetrics::CatchupMetrics(
-    uint64_t historyArchiveStatesDownloaded, uint64_t ledgersDownloaded,
+    uint64_t historyArchiveStatesDownloaded, uint64_t checkpointsDownloaded,
     uint64_t ledgersVerified, uint64_t ledgerChainsVerificationFailed,
     uint64_t bucketsDownloaded, uint64_t bucketsApplied,
-    uint64_t transactionsDownloaded, uint64_t transactionsApplied)
+    uint64_t txSetsDownloaded, uint64_t txSetsApplied)
     : mHistoryArchiveStatesDownloaded{historyArchiveStatesDownloaded}
-    , mLedgersDownloaded{ledgersDownloaded}
+    , mCheckpointsDownloaded{checkpointsDownloaded}
     , mLedgersVerified{ledgersVerified}
     , mLedgerChainsVerificationFailed{ledgerChainsVerificationFailed}
     , mBucketsDownloaded{bucketsDownloaded}
     , mBucketsApplied{bucketsApplied}
-    , mTransactionsDownloaded{transactionsDownloaded}
-    , mTransactionsApplied{transactionsApplied}
+    , mTxSetsDownloaded{txSetsDownloaded}
+    , mTxSetsApplied{txSetsApplied}
 {
 }
 
@@ -332,40 +334,40 @@ operator-(CatchupMetrics const& x, CatchupMetrics const& y)
 {
     return CatchupMetrics{
         x.mHistoryArchiveStatesDownloaded - y.mHistoryArchiveStatesDownloaded,
-        x.mLedgersDownloaded - y.mLedgersDownloaded,
+        x.mCheckpointsDownloaded - y.mCheckpointsDownloaded,
         x.mLedgersVerified - y.mLedgersVerified,
         x.mLedgerChainsVerificationFailed - y.mLedgerChainsVerificationFailed,
         x.mBucketsDownloaded - y.mBucketsDownloaded,
         x.mBucketsApplied - y.mBucketsApplied,
-        x.mTransactionsDownloaded - y.mTransactionsDownloaded,
-        x.mTransactionsApplied - y.mTransactionsApplied};
+        x.mTxSetsDownloaded - y.mTxSetsDownloaded,
+        x.mTxSetsApplied - y.mTxSetsApplied};
 }
 
 CatchupPerformedWork::CatchupPerformedWork(CatchupMetrics const& metrics)
     : mHistoryArchiveStatesDownloaded{metrics.mHistoryArchiveStatesDownloaded}
-    , mLedgersDownloaded{metrics.mLedgersDownloaded}
+    , mCheckpointsDownloaded{metrics.mCheckpointsDownloaded}
     , mLedgersVerified{metrics.mLedgersVerified}
     , mLedgerChainsVerificationFailed{metrics.mLedgerChainsVerificationFailed}
     , mBucketsDownloaded{metrics.mBucketsDownloaded > 0}
     , mBucketsApplied{metrics.mBucketsApplied > 0}
-    , mTransactionsDownloaded{metrics.mTransactionsDownloaded}
-    , mTransactionsApplied{metrics.mTransactionsApplied}
+    , mTxSetsDownloaded{metrics.mTxSetsDownloaded}
+    , mTxSetsApplied{metrics.mTxSetsApplied}
 {
 }
 
 CatchupPerformedWork::CatchupPerformedWork(
-    uint64_t historyArchiveStatesDownloaded, uint64_t ledgersDownloaded,
+    uint64_t historyArchiveStatesDownloaded, uint64_t checkpointsDownloaded,
     uint64_t ledgersVerified, uint64_t ledgerChainsVerificationFailed,
-    bool bucketsDownloaded, bool bucketsApplied,
-    uint64_t transactionsDownloaded, uint64_t transactionsApplied)
+    bool bucketsDownloaded, bool bucketsApplied, uint64_t txSetsDownloaded,
+    uint64_t txSetsApplied)
     : mHistoryArchiveStatesDownloaded{historyArchiveStatesDownloaded}
-    , mLedgersDownloaded{ledgersDownloaded}
+    , mCheckpointsDownloaded{checkpointsDownloaded}
     , mLedgersVerified{ledgersVerified}
     , mLedgerChainsVerificationFailed{ledgerChainsVerificationFailed}
     , mBucketsDownloaded{bucketsDownloaded}
     , mBucketsApplied{bucketsApplied}
-    , mTransactionsDownloaded{transactionsDownloaded}
-    , mTransactionsApplied{transactionsApplied}
+    , mTxSetsDownloaded{txSetsDownloaded}
+    , mTxSetsApplied{txSetsApplied}
 {
 }
 
@@ -376,7 +378,7 @@ operator==(CatchupPerformedWork const& x, CatchupPerformedWork const& y)
     {
         return false;
     }
-    if (x.mLedgersDownloaded != y.mLedgersDownloaded)
+    if (x.mCheckpointsDownloaded != y.mCheckpointsDownloaded)
     {
         return false;
     }
@@ -396,11 +398,11 @@ operator==(CatchupPerformedWork const& x, CatchupPerformedWork const& y)
     {
         return false;
     }
-    if (x.mTransactionsDownloaded != y.mTransactionsDownloaded)
+    if (x.mTxSetsDownloaded != y.mTxSetsDownloaded)
     {
         return false;
     }
-    if (x.mTransactionsApplied != y.mTransactionsApplied)
+    if (x.mTxSetsApplied != y.mTxSetsApplied)
     {
         return false;
     }
@@ -498,9 +500,8 @@ CatchupSimulation::generateRandomLedger(uint32_t version)
     // Provoke sortForHash and hash-caching:
     txSet->getContentsHash();
 
-    CLOG(DEBUG, "History") << "Closing synthetic ledger " << ledgerSeq
-                           << " with " << txSet->sizeTx() << " txs (txhash:"
-                           << hexAbbrev(txSet->getContentsHash()) << ")";
+    CLOG_DEBUG(History, "Closing synthetic ledger {} with {} txs (txhash:{})",
+               ledgerSeq, txSet->sizeTx(), hexAbbrev(txSet->getContentsHash()));
 
     auto upgrades = xdr::xvector<UpgradeType, 6>{};
     if (version > 0)
@@ -614,6 +615,51 @@ CatchupSimulation::ensureOnlineCatchupPossible(uint32_t targetLedger,
     ensurePublishesComplete();
 }
 
+std::vector<LedgerNumHashPair>
+CatchupSimulation::getAllPublishedCheckpoints() const
+{
+    std::vector<LedgerNumHashPair> res;
+    assert(mLedgerHashes.size() == mLedgerSeqs.size());
+    auto hi = mLedgerHashes.begin();
+    auto si = mLedgerSeqs.begin();
+    auto const& hm = mApp.getHistoryManager();
+    while (si != mLedgerSeqs.end())
+    {
+        if (hm.isLastLedgerInCheckpoint(*si))
+        {
+            LedgerNumHashPair pair;
+            pair.first = *si;
+            pair.second = make_optional<Hash>(*hi);
+            res.emplace_back(pair);
+        }
+        ++hi;
+        ++si;
+    }
+    return res;
+}
+
+LedgerNumHashPair
+CatchupSimulation::getLastPublishedCheckpoint() const
+{
+    LedgerNumHashPair pair;
+    assert(mLedgerHashes.size() == mLedgerSeqs.size());
+    auto hi = mLedgerHashes.rbegin();
+    auto si = mLedgerSeqs.rbegin();
+    auto const& hm = mApp.getHistoryManager();
+    while (si != mLedgerSeqs.rend())
+    {
+        if (hm.isLastLedgerInCheckpoint(*si))
+        {
+            pair.first = *si;
+            pair.second = make_optional<Hash>(*hi);
+            break;
+        }
+        ++hi;
+        ++si;
+    }
+    return pair;
+}
+
 void
 CatchupSimulation::crankUntil(Application::pointer app,
                               std::function<bool()> const& predicate,
@@ -638,9 +684,9 @@ CatchupSimulation::createCatchupApplication(uint32_t count,
                                             std::string const& appName,
                                             bool publish)
 {
-    CLOG(INFO, "History") << "****";
-    CLOG(INFO, "History") << "**** Create app for catchup: '" << appName << "'";
-    CLOG(INFO, "History") << "****";
+    CLOG_INFO(History, "****");
+    CLOG_INFO(History, "**** Create app for catchup: '{}'", appName);
+    CLOG_INFO(History, "****");
 
     mCfgs.emplace_back(
         getTestConfig(static_cast<int>(mCfgs.size()) + 1, dbMode));
@@ -659,8 +705,7 @@ bool
 CatchupSimulation::catchupOffline(Application::pointer app, uint32_t toLedger,
                                   bool extraValidation)
 {
-    CLOG(INFO, "History") << "starting offline catchup with toLedger="
-                          << toLedger;
+    CLOG_INFO(History, "starting offline catchup with toLedger={}", toLedger);
 
     auto startCatchupMetrics = getCatchupMetrics(app);
     auto& lm = app->getLedgerManager();
@@ -674,22 +719,25 @@ CatchupSimulation::catchupOffline(Application::pointer app, uint32_t toLedger,
 
     auto& cm = app->getCatchupManager();
     auto finished = [&]() { return cm.catchupWorkIsDone(); };
-    crankUntil(app, finished, std::chrono::seconds{60});
+
+    auto expectedCatchupWork =
+        computeCatchupPerformedWork(lastLedger, catchupConfiguration, *app);
+    crankUntil(app, finished,
+               std::chrono::seconds{std::max<int64>(
+                   expectedCatchupWork.mTxSetsApplied + 15, 60)});
 
     // Finished successfully
     auto success = cm.isCatchupInitialized() &&
                    cm.getCatchupWorkState() == BasicWork::State::WORK_SUCCESS;
     if (success)
     {
-        CLOG(INFO, "History") << "Caught up";
+        CLOG_INFO(History, "Caught up");
 
         auto endCatchupMetrics = getCatchupMetrics(app);
         auto catchupPerformedWork =
             CatchupPerformedWork{endCatchupMetrics - startCatchupMetrics};
 
-        REQUIRE(catchupPerformedWork ==
-                computeCatchupPerformedWork(lastLedger, catchupConfiguration,
-                                            *app));
+        REQUIRE(catchupPerformedWork == expectedCatchupWork);
         if (app->getHistoryArchiveManager().hasAnyWritableHistoryArchive())
         {
             auto& hm = app->getHistoryManager();
@@ -705,12 +753,14 @@ CatchupSimulation::catchupOffline(Application::pointer app, uint32_t toLedger,
 bool
 CatchupSimulation::catchupOnline(Application::pointer app, uint32_t initLedger,
                                  uint32_t bufferLedgers, uint32_t gapLedger,
-                                 int32_t numGapLedgers)
+                                 int32_t numGapLedgers,
+                                 std::vector<uint32_t> const& ledgersToInject)
 {
     auto& lm = app->getLedgerManager();
     auto startCatchupMetrics = getCatchupMetrics(app);
 
     auto& hm = app->getHistoryManager();
+    auto& herder = static_cast<HerderImpl&>(app->getHerder());
 
     // catchup will run to the final ledger in the checkpoint
     auto toLedger = hm.checkpointContainingLedger(initLedger - 1);
@@ -722,11 +772,6 @@ CatchupSimulation::catchupOnline(Application::pointer app, uint32_t initLedger,
     auto caughtUp = [&]() { return lm.isSynced(); };
 
     auto externalize = [&](uint32 n) {
-        // Remember the vectors count from 2, not 0.
-        if (n - 2 >= mLedgerCloseDatas.size())
-        {
-            return;
-        }
         if (numGapLedgers > 0 && n == gapLedger)
         {
             if (--numGapLedgers > 0)
@@ -735,18 +780,12 @@ CatchupSimulation::catchupOnline(Application::pointer app, uint32_t initLedger,
                 ++gapLedger;
             }
 
-            CLOG(INFO, "History")
-                << "simulating LedgerClose transmit gap at ledger " << n;
+            CLOG_INFO(History,
+                      "simulating LedgerClose transmit gap at ledger {}", n);
         }
         else
         {
-            // Remember the vectors count from 2, not 0.
-            auto const& lcd = mLedgerCloseDatas.at(n - 2);
-            CLOG(INFO, "History")
-                << "force-externalizing LedgerCloseData for " << n
-                << " has txhash:"
-                << hexAbbrev(lcd.getTxSet()->getContentsHash());
-            lm.valueExternalized(lcd);
+            externalizeLedger(herder, n);
         }
     };
 
@@ -766,9 +805,20 @@ CatchupSimulation::catchupOnline(Application::pointer app, uint32_t initLedger,
     }
 
     uint32_t triggerLedger = hm.ledgerToTriggerCatchup(firstLedgerInCheckpoint);
-    for (uint32_t n = initLedger; n <= triggerLedger + bufferLedgers; ++n)
+
+    if (ledgersToInject.empty())
     {
-        externalize(n);
+        for (uint32_t n = initLedger; n <= triggerLedger + bufferLedgers; ++n)
+        {
+            externalize(n);
+        }
+    }
+    else
+    {
+        for (auto ledger : ledgersToInject)
+        {
+            externalize(ledger);
+        }
     }
 
     if (caughtUp())
@@ -783,7 +833,13 @@ CatchupSimulation::catchupOnline(Application::pointer app, uint32_t initLedger,
     };
 
     auto lastLedger = lm.getLastClosedLedgerNum();
-    crankUntil(app, catchupIsDone, std::chrono::seconds{30});
+
+    auto expectedCatchupWork =
+        computeCatchupPerformedWork(lastLedger, catchupConfiguration, *app);
+
+    crankUntil(app, catchupIsDone,
+               std::chrono::seconds{std::max<int64>(
+                   expectedCatchupWork.mTxSetsApplied + 15, 60)});
 
     if (lm.getLastClosedLedgerNum() == triggerLedger + bufferLedgers)
     {
@@ -801,15 +857,36 @@ CatchupSimulation::catchupOnline(Application::pointer app, uint32_t initLedger,
         auto catchupPerformedWork =
             CatchupPerformedWork{endCatchupMetrics - startCatchupMetrics};
 
-        REQUIRE(catchupPerformedWork ==
-                computeCatchupPerformedWork(lastLedger, catchupConfiguration,
-                                            *app));
+        REQUIRE(catchupPerformedWork == expectedCatchupWork);
 
-        CLOG(INFO, "History") << "Caught up";
+        CLOG_INFO(History, "Caught up");
     }
 
     validateCatchup(app);
     return result;
+}
+
+void
+CatchupSimulation::externalizeLedger(HerderImpl& herder, uint32_t ledger)
+{
+    // Remember the vectors count from 2, not 0.
+    if (ledger - 2 >= mLedgerCloseDatas.size())
+    {
+        return;
+    }
+
+    auto const& lcd = mLedgerCloseDatas.at(ledger - 2);
+
+    CLOG_INFO(History,
+              "force-externalizing LedgerCloseData for {} has txhash:{}",
+              ledger, hexAbbrev(lcd.getTxSet()->getContentsHash()));
+
+    auto txSet = std::static_pointer_cast<TxSetFrame>(lcd.getTxSet());
+
+    herder.getPendingEnvelopes().putTxSet(lcd.getTxSet()->getContentsHash(),
+                                          lcd.getLedgerSeq(), txSet);
+    herder.getHerderSCPDriver().valueExternalized(
+        lcd.getLedgerSeq(), xdr::xdr_to_opaque(lcd.getValue()));
 }
 
 void
@@ -851,28 +928,26 @@ CatchupSimulation::validateCatchup(Application::pointer app)
                                .getCurr()
                                ->getHash();
 
-    CLOG(INFO, "History") << "Caught up: want Seq[" << i << "] = " << wantSeq;
-    CLOG(INFO, "History") << "Caught up: have Seq[" << i << "] = " << haveSeq;
+    CLOG_INFO(History, "Caught up: want Seq[{}] = {}", i, wantSeq);
+    CLOG_INFO(History, "Caught up: have Seq[{}] = {}", i, haveSeq);
 
-    CLOG(INFO, "History") << "Caught up: want Hash[" << i
-                          << "] = " << hexAbbrev(wantHash);
-    CLOG(INFO, "History") << "Caught up: have Hash[" << i
-                          << "] = " << hexAbbrev(haveHash);
+    CLOG_INFO(History, "Caught up: want Hash[{}] = {}", i, hexAbbrev(wantHash));
+    CLOG_INFO(History, "Caught up: have Hash[{}] = {}", i, hexAbbrev(haveHash));
 
-    CLOG(INFO, "History") << "Caught up: want BucketListHash[" << i
-                          << "] = " << hexAbbrev(wantBucketListHash);
-    CLOG(INFO, "History") << "Caught up: have BucketListHash[" << i
-                          << "] = " << hexAbbrev(haveBucketListHash);
+    CLOG_INFO(History, "Caught up: want BucketListHash[{}] = {}", i,
+              hexAbbrev(wantBucketListHash));
+    CLOG_INFO(History, "Caught up: have BucketListHash[{}] = {}", i,
+              hexAbbrev(haveBucketListHash));
 
-    CLOG(INFO, "History") << "Caught up: want Bucket0Hash[" << i
-                          << "] = " << hexAbbrev(wantBucket0Hash);
-    CLOG(INFO, "History") << "Caught up: have Bucket0Hash[" << i
-                          << "] = " << hexAbbrev(haveBucket0Hash);
+    CLOG_INFO(History, "Caught up: want Bucket0Hash[{}] = {}", i,
+              hexAbbrev(wantBucket0Hash));
+    CLOG_INFO(History, "Caught up: have Bucket0Hash[{}] = {}", i,
+              hexAbbrev(haveBucket0Hash));
 
-    CLOG(INFO, "History") << "Caught up: want Bucket1Hash[" << i
-                          << "] = " << hexAbbrev(wantBucket1Hash);
-    CLOG(INFO, "History") << "Caught up: have Bucket1Hash[" << i
-                          << "] = " << hexAbbrev(haveBucket1Hash);
+    CLOG_INFO(History, "Caught up: want Bucket1Hash[{}] = {}", i,
+              hexAbbrev(wantBucket1Hash));
+    CLOG_INFO(History, "Caught up: have Bucket1Hash[{}] = {}", i,
+              hexAbbrev(haveBucket1Hash));
 
     CHECK(nextLedger == haveSeq + 1);
     CHECK(wantSeq == haveSeq);
@@ -922,10 +997,11 @@ CatchupSimulation::getCatchupMetrics(Application::pointer app)
         {"history", "download-history-archive-state", "success"}, "event");
     auto historyArchiveStatesDownloaded = getHistoryArchiveStateSuccess.count();
 
-    auto& downloadLedgersSuccess = app->getMetrics().NewMeter(
+    // metric here is tracking checkpoints, not ledgers
+    auto& checkpointsDownloadSuccess = app->getMetrics().NewMeter(
         {"history", "download-ledger", "success"}, "event");
 
-    auto ledgersDownloaded = downloadLedgersSuccess.count();
+    auto checkpointsDownloaded = checkpointsDownloadSuccess.count();
 
     auto& verifyLedgerSuccess = app->getMetrics().NewMeter(
         {"history", "verify-ledger", "success"}, "event");
@@ -945,20 +1021,25 @@ CatchupSimulation::getCatchupMetrics(Application::pointer app)
 
     auto bucketsApplied = bucketApplySuccess.count();
 
-    auto& downloadTransactionsSuccess = app->getMetrics().NewMeter(
+    // metric tracks transaction sets for each ledger
+    auto& downloadTxSetsSuccess = app->getMetrics().NewMeter(
         {"history", "download-transactions", "success"}, "event");
 
-    auto transactionsDownloaded = downloadTransactionsSuccess.count();
+    auto txSetsDownloaded = downloadTxSetsSuccess.count();
 
     auto& applyLedgerSuccess = app->getMetrics().NewMeter(
         {"history", "apply-ledger-chain", "success"}, "event");
 
-    auto transactionsApplied = applyLedgerSuccess.count();
+    auto txSetsApplied = applyLedgerSuccess.count();
 
-    return CatchupMetrics{
-        historyArchiveStatesDownloaded, ledgersDownloaded,  ledgersVerified,
-        ledgerChainsVerificationFailed, bucketsDownloaded,  bucketsApplied,
-        transactionsDownloaded,         transactionsApplied};
+    return CatchupMetrics{historyArchiveStatesDownloaded,
+                          checkpointsDownloaded,
+                          ledgersVerified,
+                          ledgerChainsVerificationFailed,
+                          bucketsDownloaded,
+                          bucketsApplied,
+                          txSetsDownloaded,
+                          txSetsApplied};
 }
 
 CatchupPerformedWork
@@ -979,17 +1060,17 @@ CatchupSimulation::computeCatchupPerformedWork(
         historyArchiveStatesDownloaded++;
     }
 
-    auto ledgersDownloaded = verifyCheckpointRange.mCount;
-    uint32_t transactionsDownloaded;
+    auto checkpointsDownloaded = verifyCheckpointRange.mCount;
+    uint32_t txSetsDownloaded;
     if (catchupRange.replayLedgers())
     {
         auto applyCheckpointRange =
             CheckpointRange{catchupRange.getReplayRange(), hm};
-        transactionsDownloaded = applyCheckpointRange.mCount;
+        txSetsDownloaded = applyCheckpointRange.mCount;
     }
     else
     {
-        transactionsDownloaded = 0;
+        txSetsDownloaded = 0;
     }
 
     auto firstVerifiedLedger = std::max(LedgerManager::GENESIS_LEDGER_SEQ,
@@ -997,15 +1078,15 @@ CatchupSimulation::computeCatchupPerformedWork(
                                             hm.getCheckpointFrequency());
     auto ledgersVerified =
         catchupConfiguration.toLedger() - firstVerifiedLedger + 1;
-    auto transactionsApplied = catchupRange.getReplayCount();
+    auto txSetsApplied = catchupRange.getReplayCount();
     return {historyArchiveStatesDownloaded,
-            ledgersDownloaded,
+            checkpointsDownloaded,
             ledgersVerified,
             0,
             catchupRange.applyBuckets(),
             catchupRange.applyBuckets(),
-            transactionsDownloaded,
-            transactionsApplied};
+            txSetsDownloaded,
+            txSetsApplied};
 }
 }
 }

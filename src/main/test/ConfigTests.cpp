@@ -2,11 +2,14 @@
 // under the Apache License, Version 2.0. See the COPYING file at the root
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
+#include "crypto/SHA.h"
 #include "crypto/SecretKey.h"
 #include "lib/catch.hpp"
 #include "main/Config.h"
+#include "scp/QuorumSetUtils.h"
 #include "test/test.h"
-#include "util/format.h"
+#include "util/Math.h"
+#include <fmt/format.h>
 
 using namespace stellar;
 
@@ -395,5 +398,109 @@ TEST_CASE("load example configs", "[config]")
         {
             c.load(fnPath);
         }
+    }
+}
+
+TEST_CASE("nesting level", "[config]")
+{
+    auto makePublicKey = [](int i) {
+        auto hash = sha256(fmt::format("NODE_SEED_{}", i));
+        auto secretKey = SecretKey::fromSeed(hash);
+        return secretKey.getStrKeyPublic();
+    };
+    std::string configNesting = "UNSAFE_QUORUM=true";
+    std::string quorumSetNumber = "";
+    std::string quorumSetTemplate = R"(
+
+[QUORUM_SET{}]
+THRESHOLD_PERCENT=50
+VALIDATORS=[
+    "{} {}",
+    "{} {}"
+]
+)";
+    for (uint32 nestingLevel = 0; nestingLevel < 10; nestingLevel++)
+    {
+        configNesting += fmt::format(
+            quorumSetTemplate, quorumSetNumber, makePublicKey(nestingLevel * 2),
+            char('A' + nestingLevel * 2), makePublicKey(nestingLevel * 2 + 1),
+            char('A' + nestingLevel * 2 + 1));
+        SECTION(fmt::format("nesting level = {}", nestingLevel))
+        {
+            Config c;
+            std::stringstream ss(configNesting);
+            if (nestingLevel <= MAXIMUM_QUORUM_NESTING_LEVEL)
+            {
+                REQUIRE_NOTHROW(c.load(ss));
+            }
+            else
+            {
+                REQUIRE_THROWS(c.load(ss));
+            }
+        }
+        quorumSetNumber += ".1";
+    }
+}
+
+TEST_CASE("operation filter configuration", "[config]")
+{
+    typedef xdr::xdr_traits<OperationType> OperationTypeTraits;
+    auto toConfigStr = [](std::vector<OperationType> const& vals,
+                          std::stringstream& ss) {
+        ss << "EXCLUDE_TRANSACTIONS_CONTAINING_OPERATION_TYPE=[";
+        auto iter = vals.begin();
+        if (iter != vals.end())
+        {
+            while (iter != vals.end() - 1)
+            {
+                ss << "\"" << OperationTypeTraits::enum_name(*iter++) << "\", ";
+            }
+            ss << "\"" << OperationTypeTraits::enum_name(*iter++) << "\"";
+        }
+        ss << "]";
+        CLOG_ERROR(Tx, "{}", ss.str());
+    };
+
+    auto loadConfig = [&](std::vector<OperationType> const& vals) {
+        auto makePublicKey = [](int i) {
+            auto hash = sha256(fmt::format("NODE_SEED_{}", i));
+            auto secretKey = SecretKey::fromSeed(hash);
+            return secretKey.getStrKeyPublic();
+        };
+
+        std::stringstream ss;
+        ss << "UNSAFE_QUORUM=true\n";
+        toConfigStr(vals, ss);
+        ss << "\n[QUORUM_SET]\n";
+        ss << "THRESHOLD_PERCENT=100\n";
+        ss << "VALIDATORS=[\"" << makePublicKey(0) << " A\"]\n";
+
+        Config c;
+        REQUIRE_NOTHROW(c.load(ss));
+        auto const& exclude = c.EXCLUDE_TRANSACTIONS_CONTAINING_OPERATION_TYPE;
+        REQUIRE(exclude == vals);
+    };
+
+    // Test every operation type individually
+    for (auto v : OperationTypeTraits::enum_values())
+    {
+        std::vector<OperationType> vals;
+        vals.emplace_back(static_cast<OperationType>(v));
+        loadConfig(vals);
+    }
+
+    // Test random subsets that are not necessarily in the typical order
+    std::uniform_int_distribution<size_t> dist(
+        0, OperationTypeTraits::enum_values().size() - 1);
+    for (size_t i = 0; i < 5; ++i)
+    {
+        std::vector<OperationType> vals;
+        for (auto v : OperationTypeTraits::enum_values())
+        {
+            vals.emplace_back(static_cast<OperationType>(v));
+        }
+        std::shuffle(vals.begin(), vals.end(), gRandomEngine);
+        vals.resize(dist(gRandomEngine));
+        loadConfig(vals);
     }
 }

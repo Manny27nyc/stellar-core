@@ -151,6 +151,15 @@
     <Filter Include="transactions\simulation">
       <UniqueIdentifier>{b342c551-848c-427d-8d3b-df060afe49aa}</UniqueIdentifier>
     </Filter>
+    <Filter Include="lib\fmt">
+      <UniqueIdentifier>{1bf54804-bf4a-430d-9416-16df128fd308}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="lib\tracy">
+      <UniqueIdentifier>{59b37591-b830-4d78-9b4f-c7e2ddcea012}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="lib\spdlog">
+      <UniqueIdentifier>{f296b651-5074-4b3c-9fec-1df4233f2fec}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\lib\util\getopt_long.c">
@@ -218,9 +227,6 @@
     </ClCompile>
     <ClCompile Include="..\..\lib\xdrpp\tests\srpc.cc">
       <Filter>lib\xdrpp</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\lib\util\format.cc">
-      <Filter>lib\util</Filter>
     </ClCompile>
     <ClCompile Include="..\..\lib\asio.cpp">
       <Filter>lib</Filter>
@@ -315,9 +321,6 @@
     <ClCompile Include="..\..\src\test\TestPrinter.cpp">
       <Filter>test</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\lib\util\easylogging++.cc">
-      <Filter>lib\util</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\src\test\TestMarket.cpp">
       <Filter>test</Filter>
     </ClCompile>
@@ -340,6 +343,9 @@
       <Filter>main\generated</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\invariant\LiabilitiesMatchOffers.cpp">
+      <Filter>invariant</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\invariant\SponsorshipCountIsValid.cpp">
       <Filter>invariant</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\util\numeric.cpp">
@@ -528,6 +534,9 @@
     <ClCompile Include="..\..\src\history\HistoryArchiveManager.cpp">
       <Filter>history</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\history\HistoryArchiveReportWork.cpp">
+      <Filter>history</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\src\history\HistoryManagerImpl.cpp">
       <Filter>history</Filter>
     </ClCompile>
@@ -663,6 +672,9 @@
     <ClCompile Include="..\..\src\invariant\test\LiabilitiesMatchOffersTests.cpp">
       <Filter>invariant\tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\invariant\test\SponsorshipCountIsValidTests.cpp">
+      <Filter>invariant\tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\src\ledger\test\LedgerHeaderTests.cpp">
       <Filter>ledger\tests</Filter>
     </ClCompile>
@@ -712,6 +724,9 @@
       <Filter>util\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\util\test\FsTests.cpp">
+      <Filter>util\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\test\MathTests.cpp">
       <Filter>util\tests</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\util\test\StatusManagerTest.cpp">
@@ -849,9 +864,6 @@
     <ClCompile Include="..\..\src\overlay\test\ItemFetcherTests.cpp">
       <Filter>overlay\tests</Filter>
     </ClCompile>
-    <ClCompile Include="..\..\src\overlay\test\LoadManagerTests.cpp">
-      <Filter>overlay\tests</Filter>
-    </ClCompile>
     <ClCompile Include="..\..\src\overlay\test\LoopbackPeer.cpp">
       <Filter>overlay\tests</Filter>
     </ClCompile>
@@ -877,9 +889,6 @@
       <Filter>overlay</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\overlay\ItemFetcher.cpp">
-      <Filter>overlay</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\src\overlay\LoadManager.cpp">
       <Filter>overlay</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\overlay\OverlayManagerImpl.cpp">
@@ -950,21 +959,6 @@
     </ClCompile>
     <ClCompile Include="..\..\src\bucket\MergeKey.cpp">
       <Filter>bucket</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\src\herder\simulation\SimulationTxSetFrame.cpp">
-      <Filter>herder\simulation</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\src\catchup\simulation\ApplyTransactionsWork.cpp">
-      <Filter>catchup\simulation</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\src\catchup\simulation\HistoryArchiveStream.cpp">
-      <Filter>catchup\simulation</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\src\transactions\simulation\SimulationMergeOpFrame.cpp">
-      <Filter>transactions\simulation</Filter>
-    </ClCompile>
-    <ClCompile Include="..\..\src\transactions\simulation\SimulationTransactionFrame.cpp">
-      <Filter>transactions\simulation</Filter>
     </ClCompile>
     <ClCompile Include="..\..\src\test\FuzzerImpl.cpp">
       <Filter>test</Filter>
@@ -1041,11 +1035,119 @@
     <ClCompile Include="..\..\src\catchup\CatchupRange.cpp">
       <Filter>catchup</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\catchup\simulation\HistoryArchiveStream.cpp">
+      <Filter>catchup\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\catchup\simulation\TxSimApplyTransactionsWork.cpp">
+      <Filter>catchup\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimCreatePassiveSellOfferOpFrame.cpp">
+      <Filter>transactions\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimFeeBumpTransactionFrame.cpp">
+      <Filter>transactions\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimGenerateBucketsWork.cpp">
+      <Filter>transactions\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimManageBuyOfferOpFrame.cpp">
+      <Filter>transactions\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimManageSellOfferOpFrame.cpp">
+      <Filter>transactions\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimMergeOpFrame.cpp">
+      <Filter>transactions\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimScaleBucketlistWork.cpp">
+      <Filter>transactions\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimTransactionFrame.cpp">
+      <Filter>transactions\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimUtils.cpp">
+      <Filter>transactions\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\herder\simulation\TxSimTxSetFrame.cpp">
+      <Filter>herder\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\Scheduler.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\test\SchedulerTests.cpp">
+      <Filter>util\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\lib\tracy\TracyClient.cpp">
+      <Filter>lib\tracy</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\ledger\LedgerTxnClaimableBalanceSQL.cpp">
+      <Filter>ledger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\ClaimClaimableBalanceOpFrame.cpp">
+      <Filter>transactions</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\EndSponsoringFutureReservesOpFrame.cpp">
+      <Filter>transactions</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\CreateClaimableBalanceOpFrame.cpp">
+      <Filter>transactions</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\BeginSponsoringFutureReservesOpFrame.cpp">
+      <Filter>transactions</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\SponsorshipUtils.cpp">
+      <Filter>transactions</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\RevokeSponsorshipOpFrame.cpp">
+      <Filter>transactions</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\test\ClaimableBalanceTests.cpp">
+      <Filter>transactions\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\test\EndSponsoringFutureReservesTests.cpp">
+      <Filter>transactions\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\test\CreateAccountTests.cpp">
+      <Filter>transactions\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\test\BeginSponsoringFutureReservesTests.cpp">
+      <Filter>transactions\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\test\SponsorshipTestUtils.cpp">
+      <Filter>transactions\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\test\RevokeSponsorshipTests.cpp">
+      <Filter>transactions\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\historywork\test\HistoryWorkTests.cpp">
+      <Filter>historyWork\tests</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\historywork\WriteVerifiedCheckpointHashesWork.cpp">
+      <Filter>historyWork</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\transactions\simulation\TxSimCreateClaimableBalanceOpFrame.cpp">
+      <Filter>transactions\simulation</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\XDRCereal.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\LogSlowExecution.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\crypto\BLAKE2.cpp">
+      <Filter>crypto</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\ledger\InternalLedgerEntry.cpp">
+      <Filter>ledger</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\util\Backtrace.cpp">
+      <Filter>util</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\lib\spdlog.cpp">
+      <Filter>lib</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="..\..\lib\util\easylogging++.h">
-      <Filter>lib\util</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\lib\util\cpptoml.h">
       <Filter>lib\util</Filter>
     </ClInclude>
@@ -1087,9 +1189,6 @@
     </ClInclude>
     <ClInclude Include="..\..\src\util\types.h">
       <Filter>util</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\lib\util\format.h">
-      <Filter>lib\util</Filter>
     </ClInclude>
     <ClInclude Include="..\..\lib\util\uint128_t.h">
       <Filter>lib\util</Filter>
@@ -1147,9 +1246,6 @@
     </ClInclude>
     <ClInclude Include="..\..\src\util\GlobalChecks.h">
       <Filter>util</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\lib\util\lrucache.hpp">
-      <Filter>lib\util</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\util\HashOfHash.h">
       <Filter>util</Filter>
@@ -1266,6 +1362,9 @@
       <Filter>invariant</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\invariant\LiabilitiesMatchOffers.h">
+      <Filter>invariant</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\invariant\SponsorshipCountIsValid.h">
       <Filter>invariant</Filter>
     </ClInclude>
     <ClInclude Include="..\..\src\util\LogSlowExecution.h">
@@ -1475,6 +1574,9 @@
     <ClInclude Include="..\..\src\history\HistoryArchiveManager.h">
       <Filter>history</Filter>
     </ClInclude>
+    <ClInclude Include="..\..\src\history\HistoryArchiveReportWork.h">
+      <Filter>history</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\src\history\HistoryManager.h">
       <Filter>history</Filter>
     </ClInclude>
@@ -1667,9 +1769,6 @@
     <ClInclude Include="..\..\src\overlay\ItemFetcher.h">
       <Filter>overlay</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\src\overlay\LoadManager.h">
-      <Filter>overlay</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\src\overlay\OverlayManager.h">
       <Filter>overlay</Filter>
     </ClInclude>
@@ -1733,21 +1832,6 @@
     <ClInclude Include="..\..\src\bucket\MergeKey.h">
       <Filter>bucket</Filter>
     </ClInclude>
-    <ClInclude Include="..\..\src\herder\simulation\SimulationTxSetFrame.h">
-      <Filter>herder\simulation</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\src\catchup\simulation\ApplyTransactionsWork.h">
-      <Filter>catchup\simulation</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\src\catchup\simulation\HistoryArchiveStream.h">
-      <Filter>catchup\simulation</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\src\transactions\simulation\SimulationMergeOpFrame.h">
-      <Filter>transactions\simulation</Filter>
-    </ClInclude>
-    <ClInclude Include="..\..\src\transactions\simulation\SimulationTransactionFrame.h">
-      <Filter>transactions\simulation</Filter>
-    </ClInclude>
     <ClInclude Include="..\..\src\test\FuzzerImpl.h">
       <Filter>test</Filter>
     </ClInclude>
@@ -1801,6 +1885,126 @@
     </ClInclude>
     <ClInclude Include="..\..\src\catchup\CatchupRange.h">
       <Filter>catchup</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\catchup\simulation\HistoryArchiveStream.h">
+      <Filter>catchup\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\catchup\simulation\TxSimApplyTransactionsWork.h">
+      <Filter>catchup\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimCreatePassiveSellOfferOpFrame.h">
+      <Filter>transactions\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimFeeBumpTransactionFrame.h">
+      <Filter>transactions\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimGenerateBucketsWork.h">
+      <Filter>transactions\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimManageBuyOfferOpFrame.h">
+      <Filter>transactions\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimManageSellOfferOpFrame.h">
+      <Filter>transactions\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimMergeOpFrame.h">
+      <Filter>transactions\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimScaleBucketlistWork.h">
+      <Filter>transactions\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimTransactionFrame.h">
+      <Filter>transactions\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimUtils.h">
+      <Filter>transactions\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\herder\simulation\TxSimTxSetFrame.h">
+      <Filter>herder\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\lib\util\finally.h">
+      <Filter>lib\util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\Decoder.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\Scheduler.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\XDROperators.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\lib\fmt\include\fmt\format.h">
+      <Filter>lib\fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\ClaimClaimableBalanceOpFrame.h">
+      <Filter>transactions</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\EndSponsoringFutureReservesOpFrame.h">
+      <Filter>transactions</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\CreateClaimableBalanceOpFrame.h">
+      <Filter>transactions</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\BeginSponsoringFutureReservesOpFrame.h">
+      <Filter>transactions</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\SponsorshipUtils.h">
+      <Filter>transactions</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\RevokeSponsorshipOpFrame.h">
+      <Filter>transactions</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\test\SponsorshipTestUtils.h">
+      <Filter>transactions\tests</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\historywork\WriteVerifiedCheckpointHashesWork.h">
+      <Filter>historyWork</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\transactions\simulation\TxSimCreateClaimableBalanceOpFrame.h">
+      <Filter>transactions\simulation</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\XDRCereal.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\crypto\BLAKE2.h">
+      <Filter>crypto</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\ledger\InternalLedgerEntry.h">
+      <Filter>ledger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\ledger\NonSociRelatedException.h">
+      <Filter>ledger</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\RandHasher.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\UnorderedMap.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\UnorderedSet.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\Backtrace.h">
+      <Filter>util</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\test\Fuzzer.h">
+      <Filter>test</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\lib\spdlog\include\spdlog\spdlog.h">
+      <Filter>lib\spdlog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\lib\spdlog\include\spdlog\sinks\stdout_color_sinks.h">
+      <Filter>lib\spdlog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\lib\spdlog\include\spdlog\sinks\stdout_sinks.h">
+      <Filter>lib\spdlog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\lib\spdlog\include\spdlog\sinks\basic_file_sink.h">
+      <Filter>lib\spdlog</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\src\util\SpdlogTweaks.h">
+      <Filter>util</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -1872,7 +2076,7 @@
     </None>
     <None Include="..\..\CONTRIBUTING.md" />
     <None Include="..\..\README" />
-    <None Include="..\..\travis-build.sh" />
+    <None Include="..\..\ci-build.sh" />
     <None Include="..\..\src\history\serialize-tests\stellar-history.livenet.15686975.json">
       <Filter>history\tests\serialize-tests</Filter>
     </None>
@@ -1930,6 +2134,12 @@
     </None>
     <None Include="..\..\docs\quick-reference.md">
       <Filter>docs</Filter>
+    </None>
+    <None Include="..\..\docs\tx-simulation.md">
+      <Filter>docs</Filter>
+    </None>
+    <None Include="..\..\src\util\LogPartitions.def">
+      <Filter>util</Filter>
     </None>
   </ItemGroup>
   <ItemGroup>

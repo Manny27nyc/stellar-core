@@ -8,8 +8,8 @@
 #include "catchup/ApplyLedgerWork.h"
 #include "ledger/LedgerManager.h"
 #include "main/Application.h"
-
-#include <util/format.h>
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -27,6 +27,7 @@ ApplyBufferedLedgersWork::onReset()
 BasicWork::State
 ApplyBufferedLedgersWork::onRun()
 {
+    ZoneScoped;
     if (mConditionalWork)
     {
         mConditionalWork->crankWork();
@@ -42,7 +43,7 @@ ApplyBufferedLedgersWork::onRun()
         return State::WORK_SUCCESS;
     }
 
-    LedgerCloseData lcd = cm.getBufferedLedger();
+    LedgerCloseData lcd = cm.getFirstBufferedLedger();
 
     auto& lm = mApp.getLedgerManager();
     uint32_t expectedLedger = lm.getLastClosedLedgerNum() + 1;
@@ -50,22 +51,20 @@ ApplyBufferedLedgersWork::onRun()
     if (lcd.getLedgerSeq() != expectedLedger)
     {
         cm.logAndUpdateCatchupStatus(false);
-        CLOG(WARNING, "History")
-            << "Expected buffered ledger=" << expectedLedger
-            << ", actual=" << lcd.getLedgerSeq();
+        CLOG_WARNING(History, "Expected buffered ledger={}, actual={}",
+                     expectedLedger, lcd.getLedgerSeq());
         return State::WORK_FAILURE;
     }
 
     cm.popBufferedLedger();
 
-    CLOG(INFO, "History") << "Scheduling buffered ledger-close: "
-                          << "[seq=" << lcd.getLedgerSeq() << ", prev="
-                          << hexAbbrev(lcd.getTxSet()->previousLedgerHash())
-                          << ", txs=" << lcd.getTxSet()->sizeTx()
-                          << ", ops=" << lcd.getTxSet()->sizeOp() << ", sv: "
-                          << stellarValueToString(mApp.getConfig(),
-                                                  lcd.getValue())
-                          << "]";
+    CLOG_INFO(History,
+              "Scheduling buffered ledger-close: [seq={}, prev={}, txs={}, "
+              "ops={}, sv: {}]",
+              lcd.getLedgerSeq(),
+              hexAbbrev(lcd.getTxSet()->previousLedgerHash()),
+              lcd.getTxSet()->sizeTx(), lcd.getTxSet()->sizeOp(),
+              stellarValueToString(mApp.getConfig(), lcd.getValue()));
 
     auto applyLedger = std::make_shared<ApplyLedgerWork>(mApp, lcd);
 
@@ -98,6 +97,7 @@ ApplyBufferedLedgersWork::getStatus() const
 void
 ApplyBufferedLedgersWork::shutdown()
 {
+    ZoneScoped;
     if (mConditionalWork)
     {
         mConditionalWork->shutdown();
@@ -108,6 +108,7 @@ ApplyBufferedLedgersWork::shutdown()
 bool
 ApplyBufferedLedgersWork::onAbort()
 {
+    ZoneScoped;
     if (mConditionalWork && !mConditionalWork->isDone())
     {
         mConditionalWork->crankWork();

@@ -5,16 +5,15 @@
 #include "invariant/ConservationOfLumens.h"
 #include "invariant/InvariantManager.h"
 #include "ledger/LedgerTxn.h"
-#include "lib/util/format.h"
 #include "main/Application.h"
+#include <fmt/format.h>
 #include <numeric>
 
 namespace stellar
 {
 
 static int64_t
-calculateDeltaBalance(std::shared_ptr<LedgerEntry const> const& current,
-                      std::shared_ptr<LedgerEntry const> const& previous)
+calculateDeltaBalance(LedgerEntry const* current, LedgerEntry const* previous)
 {
     assert(current || previous);
     auto let = current ? current->data.type() : previous->data.type();
@@ -22,6 +21,35 @@ calculateDeltaBalance(std::shared_ptr<LedgerEntry const> const& current,
     {
         return (current ? current->data.account().balance : 0) -
                (previous ? previous->data.account().balance : 0);
+    }
+    if (let == CLAIMABLE_BALANCE)
+    {
+        auto const& asset = current ? current->data.claimableBalance().asset
+                                    : previous->data.claimableBalance().asset;
+
+        if (asset.type() != ASSET_TYPE_NATIVE)
+        {
+            return 0;
+        }
+
+        return ((current ? current->data.claimableBalance().amount : 0) -
+                (previous ? previous->data.claimableBalance().amount : 0));
+    }
+    return 0;
+}
+
+static int64_t
+calculateDeltaBalance(
+    std::shared_ptr<InternalLedgerEntry const> const& genCurrent,
+    std::shared_ptr<InternalLedgerEntry const> const& genPrevious)
+{
+    auto type = genCurrent ? genCurrent->type() : genPrevious->type();
+    if (type == InternalLedgerEntryType::LEDGER_ENTRY)
+    {
+        auto const* current = genCurrent ? &genCurrent->ledgerEntry() : nullptr;
+        auto const* previous =
+            genPrevious ? &genPrevious->ledgerEntry() : nullptr;
+        return calculateDeltaBalance(current, previous);
     }
     return 0;
 }

@@ -31,10 +31,10 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
     Hash networkID = sha256(getTestConfig().NETWORK_PASSPHRASE);
     Simulation::pointer simulation;
 
-    // make closing very slow
+    // do not close ledgers
     auto cfgGen = [](int cfgNum) {
         Config cfg = getTestConfig(cfgNum);
-        cfg.ARTIFICIALLY_SET_CLOSE_TIME_FOR_TESTING = 10000;
+        cfg.MANUAL_CLOSE = true;
         return cfg;
     };
 
@@ -84,7 +84,7 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
         // enough for connections to be made
         simulation->crankForAtLeast(std::chrono::seconds(1), false);
 
-        LOG(DEBUG) << "Injecting work";
+        LOG_DEBUG(DEFAULT_LOG, "Injecting work");
 
         // inject transactions
         for (int i = 0; i < nbTx; i++)
@@ -92,7 +92,7 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
             inject(i);
         }
 
-        LOG(DEBUG) << "Done injecting work";
+        LOG_DEBUG(DEFAULT_LOG, "Done injecting work");
 
         auto checkSim = [&]() {
             bool res = true;
@@ -122,8 +122,8 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
                     kv.second->Process(reporter);
                 }
             }
-            LOG(DEBUG) << " ~~~~~~ " << n->getConfig().PEER_PORT << " :\n"
-                       << out.str();
+            LOG_DEBUG(DEFAULT_LOG, " ~~~~~~ {} :\n{}", n->getConfig().PEER_PORT,
+                      out.str());
         }
         REQUIRE(checkSim());
     };
@@ -160,10 +160,10 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
                         : 0;
             }
             bool res = okCount == sources.size();
-            LOG(DEBUG) << app->getConfig().PEER_PORT
-                       << (res ? " OK " : " BEHIND ") << okCount << " / "
-                       << sources.size() << " authenticated peers: "
-                       << app->getOverlayManager().getAuthenticatedPeersCount();
+            LOG_DEBUG(DEFAULT_LOG, "{}{}{} / {} authenticated peers: {}",
+                      app->getConfig().PEER_PORT, (res ? " OK " : " BEHIND "),
+                      okCount, sources.size(),
+                      app->getOverlayManager().getAuthenticatedPeersCount());
             return res;
         };
 
@@ -207,7 +207,7 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
         // a valid transaction set
 
         std::vector<SecretKey> keys;
-        std::unordered_map<PublicKey, SecretKey> keysMap;
+        UnorderedMap<PublicKey, SecretKey> keysMap;
         for (int i = 0; i < nbTx; i++)
         {
             keys.emplace_back(SecretKey::pseudoRandomForTesting());
@@ -233,7 +233,7 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
             TxSetFrame txSet(lcl.hash);
             txSet.add(tx1);
             txSet.sortForHash();
-            auto& herder = inApp->getHerder();
+            auto& herder = static_cast<HerderImpl&>(inApp->getHerder());
 
             // build the quorum set used by this message
             // use sources as validators
@@ -246,9 +246,11 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
             // build an SCP message for the next ledger
             auto ct = std::max<uint64>(
                 lcl.header.scpValue.closeTime + 1,
-                VirtualClock::to_time_t(inApp->getClock().now()));
+                VirtualClock::to_time_t(inApp->getClock().system_now()));
             StellarValue sv(txSet.getContentsHash(), ct, emptyUpgradeSteps,
                             STELLAR_VALUE_BASIC);
+
+            herder.signStellarValue(keys[0], sv);
 
             SCPEnvelope envelope;
 
@@ -287,10 +289,10 @@ TEST_CASE("Flooding", "[flood][overlay][acceptance]")
                 },
                 true);
             bool res = okCount == sources.size();
-            LOG(DEBUG) << app->getConfig().PEER_PORT
-                       << (res ? " OK " : " BEHIND ") << okCount << " / "
-                       << sources.size() << " authenticated peers: "
-                       << app->getOverlayManager().getAuthenticatedPeersCount();
+            LOG_DEBUG(DEFAULT_LOG, "{}{}{} / {} authenticated peers: {}",
+                      app->getConfig().PEER_PORT, (res ? " OK " : " BEHIND "),
+                      okCount, sources.size(),
+                      app->getOverlayManager().getAuthenticatedPeersCount());
             return res;
         };
 

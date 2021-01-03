@@ -7,11 +7,14 @@
 #include "database/DatabaseTypeSpecificOperation.h"
 #include "medida/timer_context.h"
 #include "overlay/StellarXDR.h"
+#include "util/Decoder.h"
 #include "util/NonCopyable.h"
 #include "util/Timer.h"
+#include <functional>
 #include <set>
 #include <soci.h>
 #include <string>
+#include <xdrpp/marshal.h>
 
 namespace medida
 {
@@ -91,41 +94,36 @@ class Database : NonMovableOrCopyable
     std::map<std::string, std::shared_ptr<soci::statement>> mStatements;
     medida::Counter& mStatementsSize;
 
-    // Helpers for maintaining the total query time and calculating
-    // idle percentage.
     std::set<std::string> mEntityTypes;
-    std::chrono::nanoseconds mExcludedQueryTime;
-    std::chrono::nanoseconds mExcludedTotalTime;
-    std::chrono::nanoseconds mLastIdleQueryTime;
-    VirtualClock::time_point mLastIdleTotalTime;
 
     static bool gDriversRegistered;
     static void registerDrivers();
     void applySchemaUpgrade(unsigned long vers);
+
+    // Convert the accounts table from using explicit entries for
+    // extension fields into storing the entire extension as opaque XDR.
+    void convertAccountExtensionsToOpaqueXDR();
+    void copyIndividualAccountExtensionFieldsToOpaqueXDR();
+
+    std::string getOldLiabilitySelect(std::string const& table,
+                                      std::string const& fields);
+    void addTextColumn(std::string const& table, std::string const& column);
+    void dropNullableColumn(std::string const& table,
+                            std::string const& column);
+
+    // Convert the trustlines table from using explicit entries for
+    // extension fields into storing the entire extension as opaque XDR.
+    void convertTrustLineExtensionsToOpaqueXDR();
+    void copyIndividualTrustLineExtensionFieldsToOpaqueXDR();
 
   public:
     // Instantiate object and connect to app.getConfig().DATABASE;
     // if there is a connection error, this will throw.
     Database(Application& app);
 
-    // Return a crude meter of total queries to the db, for use in
-    // overlay/LoadManager.
-    medida::Meter& getQueryMeter();
-
-    // Number of nanoseconds spent processing queries since app startup,
-    // without any reference to excluded time or running counters.
-    // Strictly a sum of measured time.
-    std::chrono::nanoseconds totalQueryTime() const;
-
-    // Subtract a number of nanoseconds from the running time counts,
-    // due to database usage spikes, specifically during ledger-close.
-    void excludeTime(std::chrono::nanoseconds const& queryTime,
-                     std::chrono::nanoseconds const& totalTime);
-
-    // Return the percent of the time since the last call to this
-    // method that database has been idle, _excluding_ the times
-    // excluded above via `excludeTime`.
-    uint32_t recentIdleDbPercent();
+    virtual ~Database()
+    {
+    }
 
     // Return a logging helper that will capture all SQL statements made
     // on the main connection while active, and will log those statements
@@ -196,6 +194,16 @@ class Database : NonMovableOrCopyable
     // Access the optional SOCI connection pool available for worker
     // threads. Throws an error if !canUsePool().
     soci::connection_pool& getPool();
+
+  protected:
+    // Give clients the opportunity to perform operations on databases while
+    // they're still using old schemas (prior to the upgrade that occurs either
+    // immediately after database creation or after loading a version of
+    // stellar-core that introduces a new schema).
+    virtual void
+    actBeforeDBSchemaUpgrade()
+    {
+    }
 };
 
 template <typename T>
@@ -220,14 +228,88 @@ Database::doDatabaseTypeSpecificOperation(DatabaseTypeSpecificOperation<T>& op)
     }
 }
 
-class DBTimeExcluder : NonCopyable
+// Select a set of records using a client-defined query string, then map
+// each record into an element of a client-defined datatype by applying a
+// client-defined function (the records are accumulated in the "out"
+// vector).
+template <typename T>
+void
+selectMap(Database& db, std::string const& selectStr,
+          std::function<T(soci::row const&)> makeT, std::vector<T>& out)
 {
-    Application& mApp;
-    std::chrono::nanoseconds mStartQueryTime;
-    VirtualClock::time_point mStartTotalTime;
+    soci::rowset<soci::row> rs = (db.getSession().prepare << selectStr);
 
-  public:
-    DBTimeExcluder(Application& mApp);
-    ~DBTimeExcluder();
-};
+    std::transform(rs.begin(), rs.end(), std::back_inserter(out), makeT);
+}
+
+// Map each element in the given vector of a client-defined datatype into a
+// SQL update command by applying a client-defined function, then send those
+// update strings to the database.
+//
+// The "postUpdate" function receives the number of records affected
+// by the given update, as well as the element of the client-defined
+// datatype which generated that update.
+template <typename T>
+void updateMap(Database& db, std::vector<T> const& in,
+               std::string const& updateStr,
+               std::function<void(soci::statement&, T const&)> prepUpdate,
+               std::function<void(long long const, T const&)> postUpdate);
+template <typename T>
+void
+updateMap(Database& db, std::vector<T> const& in, std::string const& updateStr,
+          std::function<void(soci::statement&, T const&)> prepUpdate,
+          std::function<void(long long const, T const&)> postUpdate)
+{
+    auto st_update = db.getPreparedStatement(updateStr).statement();
+
+    for (auto& recT : in)
+    {
+        prepUpdate(st_update, recT);
+        st_update.define_and_bind();
+        st_update.execute(true);
+        auto affected_rows = st_update.get_affected_rows();
+        st_update.clean_up(false);
+        postUpdate(affected_rows, recT);
+    }
+}
+
+// The composition of updateMap() following selectMap().
+//
+// Returns the number of records selected by selectMap() (all of which were
+// then passed through updateMap() before the selectUpdateMap() call
+// returned).
+template <typename T>
+size_t
+selectUpdateMap(Database& db, std::string const& selectStr,
+                std::function<T(soci::row const&)> makeT,
+                std::string const& updateStr,
+                std::function<void(soci::statement&, T const&)> prepUpdate,
+                std::function<void(long long const, T const&)> postUpdate)
+{
+    std::vector<T> vecT;
+
+    selectMap<T>(db, selectStr, makeT, vecT);
+    updateMap<T>(db, vecT, updateStr, prepUpdate, postUpdate);
+
+    return vecT.size();
+}
+
+template <typename T>
+void
+decodeOpaqueXDR(std::string const& in, T& out)
+{
+    std::vector<uint8_t> opaque;
+    decoder::decode_b64(in, opaque);
+    xdr::xdr_from_opaque(opaque, out);
+}
+
+template <typename T>
+void
+decodeOpaqueXDR(std::string const& in, soci::indicator const& ind, T& out)
+{
+    if (ind == soci::i_ok)
+    {
+        decodeOpaqueXDR(in, out);
+    }
+}
 }

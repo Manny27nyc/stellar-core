@@ -11,6 +11,7 @@
 #include "scp/Slot.h"
 #include "util/Decoder.h"
 #include "util/XDRStream.h"
+#include <Tracy.hpp>
 
 #include <soci.h>
 #include <xdrpp/marshal.h>
@@ -37,12 +38,13 @@ HerderPersistenceImpl::saveSCPHistory(uint32_t seq,
                                       std::vector<SCPEnvelope> const& envs,
                                       QuorumTracker::QuorumMap const& qmap)
 {
+    ZoneScoped;
     if (envs.empty())
     {
         return;
     }
 
-    auto usedQSets = std::unordered_map<Hash, SCPQuorumSetPtr>{};
+    auto usedQSets = UnorderedMap<Hash, SCPQuorumSetPtr>{};
     auto& db = mApp.getDatabase();
 
     soci::transaction txscope(db.getSession());
@@ -97,13 +99,13 @@ HerderPersistenceImpl::saveSCPHistory(uint32_t seq,
     for (auto const& p : qmap)
     {
         auto const& nodeID = p.first;
-        if (!p.second)
+        if (!p.second.mQuorumSet)
         {
             // skip node if we don't have its quorum set
             continue;
         }
-        auto qSetH = sha256(xdr::xdr_to_opaque(*p.second));
-        usedQSets.insert(std::make_pair(qSetH, p.second));
+        auto qSetH = xdrSha256(*(p.second.mQuorumSet));
+        usedQSets.insert(std::make_pair(qSetH, p.second.mQuorumSet));
 
         std::string nodeIDStrKey = KeyUtils::toStrKey(nodeID);
         std::string qSetHHex(binToHex(qSetH));
@@ -141,19 +143,43 @@ HerderPersistenceImpl::saveSCPHistory(uint32_t seq,
     {
         std::string qSetH = binToHex(p.first);
 
-        auto prepUpQSet =
-            db.getPreparedStatement("UPDATE scpquorums SET "
-                                    "lastledgerseq = :l WHERE qsethash = :h");
-
-        auto& stUp = prepUpQSet.statement();
-        stUp.exchange(soci::use(seq));
-        stUp.exchange(soci::use(qSetH));
-        stUp.define_and_bind();
+        uint32_t lastSeenSeq;
+        auto prepSelQSet = db.getPreparedStatement(
+            "SELECT lastledgerseq FROM scpquorums WHERE qsethash = :h");
+        auto& stSel = prepSelQSet.statement();
+        stSel.exchange(soci::into(lastSeenSeq));
+        stSel.exchange(soci::use(qSetH));
+        stSel.define_and_bind();
         {
-            auto timer = db.getInsertTimer("scpquorums");
-            stUp.execute(true);
+            auto timer = db.getSelectTimer("scpquorums");
+            stSel.execute(true);
         }
-        if (stUp.get_affected_rows() != 1)
+
+        if (stSel.got_data())
+        {
+            if (lastSeenSeq >= seq)
+            {
+                continue;
+            }
+
+            auto prepUpQSet = db.getPreparedStatement(
+                "UPDATE scpquorums SET "
+                "lastledgerseq = :l WHERE qsethash = :h");
+
+            auto& stUp = prepUpQSet.statement();
+            stUp.exchange(soci::use(seq));
+            stUp.exchange(soci::use(qSetH));
+            stUp.define_and_bind();
+            {
+                auto timer = db.getInsertTimer("scpquorums");
+                stUp.execute(true);
+            }
+            if (stUp.get_affected_rows() != 1)
+            {
+                throw std::runtime_error("Could not update data in SQL");
+            }
+        }
+        else
         {
             auto qSetBytes(xdr::xdr_to_opaque(*p.second));
 
@@ -190,11 +216,12 @@ HerderPersistence::copySCPHistoryToStream(Database& db, soci::session& sess,
                                           uint32_t ledgerCount,
                                           XDROutputFileStream& scpHistory)
 {
+    ZoneScoped;
     uint32_t begin = ledgerSeq, end = ledgerSeq + ledgerCount;
     size_t n = 0;
 
     // all known quorum sets
-    std::unordered_map<Hash, SCPQuorumSet> qSets;
+    UnorderedMap<Hash, SCPQuorumSet> qSets;
 
     for (uint32_t curLedgerSeq = begin; curLedgerSeq < end; curLedgerSeq++)
     {
@@ -273,6 +300,7 @@ optional<Hash>
 HerderPersistence::getNodeQuorumSet(Database& db, soci::session& sess,
                                     NodeID const& nodeID)
 {
+    ZoneScoped;
     std::string nodeIDStrKey = KeyUtils::toStrKey(nodeID);
     std::string qsethHex;
 
@@ -296,6 +324,7 @@ SCPQuorumSetPtr
 HerderPersistence::getQuorumSet(Database& db, soci::session& sess,
                                 Hash const& qSetHash)
 {
+    ZoneScoped;
     SCPQuorumSetPtr res;
     SCPQuorumSet qset;
     std::string qset64, qSetHashHex;
@@ -326,6 +355,7 @@ HerderPersistence::getQuorumSet(Database& db, soci::session& sess,
 void
 HerderPersistence::dropAll(Database& db)
 {
+    ZoneScoped;
     db.getSession() << "DROP TABLE IF EXISTS scphistory";
 
     db.getSession() << "DROP TABLE IF EXISTS scpquorums";
@@ -364,6 +394,7 @@ void
 HerderPersistence::deleteOldEntries(Database& db, uint32_t ledgerSeq,
                                     uint32_t count)
 {
+    ZoneScoped;
     DatabaseUtils::deleteOldEntriesHelper(db.getSession(), ledgerSeq, count,
                                           "scphistory", "ledgerseq");
     DatabaseUtils::deleteOldEntriesHelper(db.getSession(), ledgerSeq, count,

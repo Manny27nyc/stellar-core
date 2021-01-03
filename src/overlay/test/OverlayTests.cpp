@@ -21,7 +21,7 @@
 #include "medida/meter.h"
 #include "medida/metrics_registry.h"
 #include "medida/timer.h"
-#include "util/format.h"
+#include <fmt/format.h>
 #include <numeric>
 
 using namespace stellar;
@@ -867,8 +867,8 @@ TEST_CASE("drop peers who straggle", "[overlay][connections][straggler]")
             });
             clock.crank(false);
         }
-        LOG(INFO) << "loop complete, clock.now() = "
-                  << clock.now().time_since_epoch().count();
+        LOG_INFO(DEFAULT_LOG, "loop complete, clock.now() = {}",
+                 clock.now().time_since_epoch().count());
         REQUIRE(clock.now() < (start + waitTime + padTime));
         REQUIRE(!conn.getInitiator()->isConnected());
         REQUIRE(!conn.getAcceptor()->isConnected());
@@ -982,9 +982,13 @@ TEST_CASE("connecting to saturated nodes", "[overlay][connections][acceptance]")
 
     simulation->addNode(vNode1SecretKey, qSet, &node1Cfg);
 
+    // large timeout here as nodes may have a few bad attempts
+    // (crossed connections) and we rely on jittered backoffs
+    // to mitigate this
+
     simulation->addPendingConnection(vNode1NodeID, vHeadNodeID);
     simulation->startAllNodes();
-    // 1 connects to h
+    UNSCOPED_INFO("1 connects to h");
     simulation->crankUntil(
         [&]() { return numberOfSimulationConnections() == 2; },
         std::chrono::seconds{3}, false);
@@ -992,26 +996,26 @@ TEST_CASE("connecting to saturated nodes", "[overlay][connections][acceptance]")
     simulation->addNode(vNode2SecretKey, qSet, &node2Cfg);
     simulation->addPendingConnection(vNode2NodeID, vHeadNodeID);
     simulation->startAllNodes();
-    // 2 connects to 1
+    UNSCOPED_INFO("2 connects to 1");
     simulation->crankUntil(
         [&]() { return numberOfSimulationConnections() == 4; },
-        std::chrono::seconds{10}, false);
+        std::chrono::seconds{20}, false);
 
     simulation->addNode(vNode3SecretKey, qSet, &node3Cfg);
     simulation->addPendingConnection(vNode3NodeID, vHeadNodeID);
     simulation->startAllNodes();
-    // 3 connects to 2
+    UNSCOPED_INFO("3 connects to 2");
     simulation->crankUntil(
         [&]() { return numberOfSimulationConnections() == 6; },
-        std::chrono::seconds{15}, false);
+        std::chrono::seconds{30}, false);
 
     simulation->removeNode(headId);
-    // wait for node to be disconnected
+    UNSCOPED_INFO("wait for node to be disconnected");
     simulation->crankForAtLeast(std::chrono::seconds{2}, false);
-    // wait for 1 to connect to 3
+    UNSCOPED_INFO("wait for 1 to connect to 3");
     simulation->crankUntil(
         [&]() { return numberOfSimulationConnections() == 6; },
-        std::chrono::seconds{15}, true);
+        std::chrono::seconds{30}, true);
 }
 
 TEST_CASE("inbounds nodes can be promoted to ouboundvalid",

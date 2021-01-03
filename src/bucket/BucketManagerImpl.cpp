@@ -16,8 +16,8 @@
 #include "util/LogSlowExecution.h"
 #include "util/Logging.h"
 #include "util/TmpDir.h"
-#include "util/format.h"
 #include "util/types.h"
+#include <fmt/format.h>
 #include <fstream>
 #include <map>
 #include <regex>
@@ -27,6 +27,7 @@
 #include "medida/meter.h"
 #include "medida/metrics_registry.h"
 #include "medida/timer.h"
+#include <Tracy.hpp>
 
 namespace stellar
 {
@@ -42,6 +43,7 @@ BucketManager::create(Application& app)
 void
 BucketManagerImpl::initialize()
 {
+    ZoneScoped;
     std::string d = mApp.getConfig().BUCKET_DIR_PATH;
 
     if (!fs::exists(d))
@@ -82,15 +84,8 @@ BucketManagerImpl::initialize()
 void
 BucketManagerImpl::dropAll()
 {
-    std::string d = mApp.getConfig().BUCKET_DIR_PATH;
-
-    if (fs::exists(d))
-    {
-        CLOG(DEBUG, "Bucket") << "Deleting bucket directory: " << d;
-        cleanDir();
-        fs::deltree(d);
-    }
-
+    ZoneScoped;
+    deleteEntireBucketDir();
     initialize();
 }
 
@@ -112,7 +107,7 @@ BucketManagerImpl::BucketManagerImpl(Application& app)
     , mBucketSnapMerge(app.getMetrics().NewTimer({"bucket", "snap", "merge"}))
     , mSharedBucketsSize(
           app.getMetrics().NewCounter({"bucket", "memory", "shared"}))
-
+    , mDeleteEntireBucketDirInDtor(app.getConfig().MODE_USES_IN_MEMORY_LEDGER)
 {
 }
 
@@ -156,6 +151,7 @@ BucketManagerImpl::bucketFilename(Hash const& hash)
 std::string const&
 BucketManagerImpl::getTmpDir()
 {
+    ZoneScoped;
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     if (!mWorkDir)
     {
@@ -173,12 +169,52 @@ BucketManagerImpl::getBucketDir() const
 
 BucketManagerImpl::~BucketManagerImpl()
 {
-    cleanDir();
+    ZoneScoped;
+    if (mDeleteEntireBucketDirInDtor)
+    {
+        deleteEntireBucketDir();
+    }
+    else
+    {
+        deleteTmpDirAndUnlockBucketDir();
+    }
 }
 
 void
-BucketManagerImpl::cleanDir()
+BucketManagerImpl::deleteEntireBucketDir()
 {
+    ZoneScoped;
+    std::string d = mApp.getConfig().BUCKET_DIR_PATH;
+    if (fs::exists(d))
+    {
+        // First clean out the contents of the tmpdir, as usual.
+        deleteTmpDirAndUnlockBucketDir();
+
+        // Then more seriously delete _all the buckets_, even live
+        // ones that represent the canonical state of the ledger.
+        //
+        // Should only happen on new-db or in-memory-replay shutdown.
+        CLOG_DEBUG(Bucket, "Deleting bucket directory: {}", d);
+        fs::deltree(d);
+    }
+}
+
+void
+BucketManagerImpl::deleteTmpDirAndUnlockBucketDir()
+{
+    ZoneScoped;
+
+    // First do fs::deltree on $BUCKET_DIR_PATH/tmp/bucket
+    //
+    // (which should just be bucket merges-in-progress and such)
+    mWorkDir.reset();
+
+    // Then do fs::deltree on $BUCKET_DIR_PATH/tmp
+    //
+    // (which also contains files from other subsystems, like history)
+    mTmpDirManager.reset();
+
+    // Then delete the lockfile $BUCKET_DIR_PATH/stellar-core.lock
     if (mLockedBucketDir)
     {
         std::string d = mApp.getConfig().BUCKET_DIR_PATH;
@@ -187,8 +223,6 @@ BucketManagerImpl::cleanDir()
         fs::unlockFile(lock);
         mLockedBucketDir.reset();
     }
-    mWorkDir.reset();
-    mTmpDirManager.reset();
 }
 
 BucketList&
@@ -304,6 +338,7 @@ BucketManagerImpl::incrMergeCounters(MergeCounters const& delta)
 bool
 BucketManagerImpl::renameBucket(std::string const& src, std::string const& dst)
 {
+    ZoneScoped;
     if (mApp.getConfig().DISABLE_XDR_FSYNC)
     {
         return rename(src.c_str(), dst.c_str()) == 0;
@@ -319,6 +354,7 @@ BucketManagerImpl::adoptFileAsBucket(std::string const& filename,
                                      uint256 const& hash, size_t nObjects,
                                      size_t nBytes, MergeKey* mergeKey)
 {
+    ZoneScoped;
     releaseAssertOrThrow(mApp.getConfig().MODE_ENABLES_BUCKETLIST);
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
 
@@ -331,9 +367,10 @@ BucketManagerImpl::adoptFileAsBucket(std::string const& filename,
         // weak record of the input/output mapping, so we can reconstruct the
         // future if anyone wants to restart the same merge before the bucket
         // expires.
-        CLOG(TRACE, "Bucket")
-            << "BucketManager::adoptFileAsBucket switching merge " << *mergeKey
-            << " from live to finished for output=" << hexAbbrev(hash);
+        CLOG_TRACE(Bucket,
+                   "BucketManager::adoptFileAsBucket switching merge {} from "
+                   "live to finished for output={}",
+                   *mergeKey, hexAbbrev(hash));
         mLiveFutures.erase(*mergeKey);
     }
 
@@ -341,8 +378,10 @@ BucketManagerImpl::adoptFileAsBucket(std::string const& filename,
     std::shared_ptr<Bucket> b = getBucketByHash(hash);
     if (b)
     {
-        CLOG(DEBUG, "Bucket") << "Deleting bucket file " << filename
-                              << " that is redundant with existing bucket";
+        CLOG_DEBUG(
+            Bucket,
+            "Deleting bucket file {} that is redundant with existing bucket",
+            filename);
         {
             auto timer = LogSlowExecution("Delete redundant bucket");
             std::remove(filename.c_str());
@@ -351,8 +390,8 @@ BucketManagerImpl::adoptFileAsBucket(std::string const& filename,
     else
     {
         std::string canonicalName = bucketFilename(hash);
-        CLOG(DEBUG, "Bucket")
-            << "Adopting bucket file " << filename << " as " << canonicalName;
+        CLOG_DEBUG(Bucket, "Adopting bucket file {} as {}", filename,
+                   canonicalName);
         if (!renameBucket(filename, canonicalName))
         {
             std::string err("Failed to rename bucket :");
@@ -398,14 +437,14 @@ BucketManagerImpl::noteEmptyMergeOutput(MergeKey const& mergeKey)
     // output, potentially retaining far too many inputs, as lots of different
     // mergeKeys result in an empty output.
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG(TRACE, "Bucket") << "BucketManager::noteEmptyMergeOutput(" << mergeKey
-                          << ")";
+    CLOG_TRACE(Bucket, "BucketManager::noteEmptyMergeOutput({})", mergeKey);
     mLiveFutures.erase(mergeKey);
 }
 
 std::shared_ptr<Bucket>
 BucketManagerImpl::getBucketByHash(uint256 const& hash)
 {
+    ZoneScoped;
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     if (isZero(hash))
     {
@@ -414,17 +453,17 @@ BucketManagerImpl::getBucketByHash(uint256 const& hash)
     auto i = mSharedBuckets.find(hash);
     if (i != mSharedBuckets.end())
     {
-        CLOG(TRACE, "Bucket")
-            << "BucketManager::getBucketByHash(" << binToHex(hash)
-            << ") found bucket " << i->second->getFilename();
+        CLOG_TRACE(Bucket, "BucketManager::getBucketByHash({}) found bucket {}",
+                   binToHex(hash), i->second->getFilename());
         return i->second;
     }
     std::string canonicalName = bucketFilename(hash);
     if (fs::exists(canonicalName))
     {
-        CLOG(TRACE, "Bucket")
-            << "BucketManager::getBucketByHash(" << binToHex(hash)
-            << ") found no bucket, making new one";
+        CLOG_TRACE(Bucket,
+                   "BucketManager::getBucketByHash({}) found no bucket, making "
+                   "new one",
+                   binToHex(hash));
         auto p = std::make_shared<Bucket>(canonicalName, hash);
         mSharedBuckets.emplace(hash, p);
         mSharedBucketsSize.set_count(mSharedBuckets.size());
@@ -436,6 +475,7 @@ BucketManagerImpl::getBucketByHash(uint256 const& hash)
 std::shared_future<std::shared_ptr<Bucket>>
 BucketManagerImpl::getMergeFuture(MergeKey const& key)
 {
+    ZoneScoped;
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     MergeCounters mc;
     auto i = mLiveFutures.find(key);
@@ -449,10 +489,10 @@ BucketManagerImpl::getMergeFuture(MergeKey const& key)
             auto bucket = getBucketByHash(bucketHash);
             if (bucket)
             {
-                CLOG(TRACE, "Bucket")
-                    << "BucketManager::getMergeFuture returning new "
-                    << "future for finished merge " << key
-                    << " with output=" << hexAbbrev(bucketHash);
+                CLOG_TRACE(Bucket,
+                           "BucketManager::getMergeFuture returning new future "
+                           "for finished merge {} with output={}",
+                           key, hexAbbrev(bucketHash));
                 std::promise<std::shared_ptr<Bucket>> promise;
                 auto future = promise.get_future().share();
                 promise.set_value(bucket);
@@ -461,14 +501,16 @@ BucketManagerImpl::getMergeFuture(MergeKey const& key)
                 return future;
             }
         }
-        CLOG(TRACE, "Bucket")
-            << "BucketManager::getMergeFuture returning empty future "
-            << "for merge " << key;
+        CLOG_TRACE(
+            Bucket,
+            "BucketManager::getMergeFuture returning empty future for merge {}",
+            key);
         return std::shared_future<std::shared_ptr<Bucket>>();
     }
-    CLOG(TRACE, "Bucket")
-        << "BucketManager::getMergeFuture returning running future "
-        << "for merge " << key;
+    CLOG_TRACE(
+        Bucket,
+        "BucketManager::getMergeFuture returning running future for merge {}",
+        key);
     mc.mRunningMergeReattachments++;
     incrMergeCounters(mc);
     return i->second;
@@ -478,10 +520,13 @@ void
 BucketManagerImpl::putMergeFuture(
     MergeKey const& key, std::shared_future<std::shared_ptr<Bucket>> wp)
 {
+    ZoneScoped;
     releaseAssertOrThrow(mApp.getConfig().MODE_ENABLES_BUCKETLIST);
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
-    CLOG(TRACE, "Bucket") << "BucketManager::putMergeFuture storing future "
-                          << "for running merge " << key;
+    CLOG_TRACE(
+        Bucket,
+        "BucketManager::putMergeFuture storing future for running merge {}",
+        key);
     mLiveFutures.emplace(key, wp);
 }
 
@@ -497,6 +542,7 @@ BucketManagerImpl::clearMergeFuturesForTesting()
 std::set<Hash>
 BucketManagerImpl::getReferencedBuckets() const
 {
+    ZoneScoped;
     std::set<Hash> referenced;
     if (!mApp.getConfig().MODE_ENABLES_BUCKETLIST)
     {
@@ -510,21 +556,21 @@ BucketManagerImpl::getReferencedBuckets() const
         auto rit = referenced.emplace(level.getCurr()->getHash());
         if (rit.second)
         {
-            CLOG(TRACE, "Bucket")
-                << binToHex(*rit.first) << " referenced by bucket list";
+            CLOG_TRACE(Bucket, "{} referenced by bucket list",
+                       binToHex(*rit.first));
         }
         rit = referenced.emplace(level.getSnap()->getHash());
         if (rit.second)
         {
-            CLOG(TRACE, "Bucket")
-                << binToHex(*rit.first) << " referenced by bucket list";
+            CLOG_TRACE(Bucket, "{} referenced by bucket list",
+                       binToHex(*rit.first));
         }
         for (auto const& h : level.getNext().getHashes())
         {
             rit = referenced.emplace(hexToBin256(h));
             if (rit.second)
             {
-                CLOG(TRACE, "Bucket") << h << " referenced by bucket list";
+                CLOG_TRACE(Bucket, "{} referenced by bucket list", h);
             }
         }
     }
@@ -537,7 +583,7 @@ BucketManagerImpl::getReferencedBuckets() const
         auto rit = referenced.emplace(hexToBin256(h));
         if (rit.second)
         {
-            CLOG(TRACE, "Bucket") << h << " referenced by LCL";
+            CLOG_TRACE(Bucket, "{} referenced by LCL", h);
         }
     }
 
@@ -550,7 +596,7 @@ BucketManagerImpl::getReferencedBuckets() const
             auto rit = referenced.emplace(rhash);
             if (rit.second)
             {
-                CLOG(TRACE, "Bucket") << h << " referenced by publish queue";
+                CLOG_TRACE(Bucket, "{} referenced by publish queue", h);
 
                 // Project referenced bucket `rhash` -- which might be a merge
                 // input captured before a merge finished -- through our weak
@@ -567,6 +613,7 @@ BucketManagerImpl::getReferencedBuckets() const
 void
 BucketManagerImpl::cleanupStaleFiles()
 {
+    ZoneScoped;
     if (mApp.getConfig().DISABLE_BUCKET_GC)
     {
         return;
@@ -597,6 +644,7 @@ BucketManagerImpl::cleanupStaleFiles()
 void
 BucketManagerImpl::forgetUnreferencedBuckets()
 {
+    ZoneScoped;
     std::lock_guard<std::recursive_mutex> lock(mBucketMutex);
     auto referenced = getReferencedBuckets();
 
@@ -621,12 +669,12 @@ BucketManagerImpl::forgetUnreferencedBuckets()
             j->second.use_count() == 1)
         {
             auto filename = j->second->getFilename();
-            CLOG(TRACE, "Bucket")
-                << "BucketManager::forgetUnreferencedBuckets dropping "
-                << filename;
+            CLOG_TRACE(Bucket,
+                       "BucketManager::forgetUnreferencedBuckets dropping {}",
+                       filename);
             if (!filename.empty() && !mApp.getConfig().DISABLE_BUCKET_GC)
             {
-                CLOG(TRACE, "Bucket") << "removing bucket file: " << filename;
+                CLOG_TRACE(Bucket, "removing bucket file: {}", filename);
                 std::remove(filename.c_str());
                 auto gzfilename = filename + ".gz";
                 std::remove(gzfilename.c_str());
@@ -650,9 +698,10 @@ BucketManagerImpl::forgetUnreferencedBuckets()
                 auto f = mLiveFutures.find(forgottenMergeKey);
                 if (f != mLiveFutures.end())
                 {
-                    CLOG(WARNING, "Bucket")
-                        << "Unexpected live future for unreferenced bucket: "
-                        << binToHex(i->first);
+                    CLOG_WARNING(
+                        Bucket,
+                        "Unexpected live future for unreferenced bucket: {}",
+                        binToHex(i->first));
                     mLiveFutures.erase(f);
                 }
             }
@@ -671,6 +720,7 @@ BucketManagerImpl::addBatch(Application& app, uint32_t currLedger,
                             std::vector<LedgerEntry> const& liveEntries,
                             std::vector<LedgerKey> const& deadEntries)
 {
+    ZoneScoped;
     releaseAssertOrThrow(app.getConfig().MODE_ENABLES_BUCKETLIST);
 #ifdef BUILD_TESTS
     if (mUseFakeTestValuesForNextClose)
@@ -712,6 +762,7 @@ BucketManagerImpl::getBucketHashesInBucketDirForTesting() const
 void
 BucketManagerImpl::snapshotLedger(LedgerHeader& currentHeader)
 {
+    ZoneScoped;
     Hash hash;
     if (mApp.getConfig().MODE_ENABLES_BUCKETLIST)
     {
@@ -759,6 +810,7 @@ BucketManagerImpl::calculateSkipValues(LedgerHeader& currentHeader)
 std::vector<std::string>
 BucketManagerImpl::checkForMissingBucketsFiles(HistoryArchiveState const& has)
 {
+    ZoneScoped;
     std::vector<std::string> buckets = has.allBuckets();
     std::vector<std::string> result;
     std::copy_if(buckets.begin(), buckets.end(), std::back_inserter(result),
@@ -774,6 +826,7 @@ void
 BucketManagerImpl::assumeState(HistoryArchiveState const& has,
                                uint32_t maxProtocolVersion)
 {
+    ZoneScoped;
     releaseAssertOrThrow(mApp.getConfig().MODE_ENABLES_BUCKETLIST);
     for (uint32_t i = 0; i < BucketList::kNumLevels; ++i)
     {
@@ -796,7 +849,22 @@ BucketManagerImpl::assumeState(HistoryArchiveState const& has,
 void
 BucketManagerImpl::shutdown()
 {
-    // forgetUnreferencedBuckets does what we want - it retains needed buckets
-    forgetUnreferencedBuckets();
+    ZoneScoped;
+
+    if (!mIsShutdown)
+    {
+        mIsShutdown = true;
+
+        // This call happens in shutdown -- before destruction -- so that we
+        // can be sure other subsystems (ledger etc.) are still alive and we
+        // can call into them to figure out which buckets _are_ referenced.
+        forgetUnreferencedBuckets();
+    }
+}
+
+bool
+BucketManagerImpl::isShutdown() const
+{
+    return mIsShutdown;
 }
 }

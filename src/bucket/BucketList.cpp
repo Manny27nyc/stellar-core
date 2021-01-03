@@ -12,9 +12,10 @@
 #include "main/Application.h"
 #include "util/Logging.h"
 #include "util/XDRStream.h"
-#include "util/format.h"
 #include "util/types.h"
+#include <Tracy.hpp>
 #include <cassert>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -29,10 +30,10 @@ BucketLevel::BucketLevel(uint32_t i)
 uint256
 BucketLevel::getHash() const
 {
-    auto hsh = SHA256::create();
-    hsh->add(mCurr->getHash());
-    hsh->add(mSnap->getHash());
-    return hsh->finish();
+    SHA256 hsh;
+    hsh.add(mCurr->getHash());
+    hsh.add(mSnap->getHash());
+    return hsh.finish();
 }
 
 FutureBucket const&
@@ -72,6 +73,32 @@ BucketLevel::setCurr(std::shared_ptr<Bucket> b)
     mCurr = b;
 }
 
+bool
+BucketList::shouldMergeWithEmptyCurr(uint32_t ledger, uint32_t level)
+{
+
+    if (level != 0)
+    {
+        // Round down the current ledger to when the merge was started, and
+        // re-start the merge via prepare, mimicking the logic in `addBatch`
+        auto mergeStartLedger = mask(ledger, BucketList::levelHalf(level - 1));
+
+        // Subtle: We're "preparing the next state" of this level's mCurr, which
+        // is *either* mCurr merged with snap, or else just snap (if mCurr is
+        // going to be snapshotted itself in the next spill). This second
+        // condition happens when currLedger is one multiple of the previous
+        // levels's spill-size away from a snap of its own.  Eg. level 1 at
+        // ledger 6 (2 away from 8, its next snap), or level 2 at ledger 24 (8
+        // away from 32, its next snap). See diagram above.
+        uint32_t nextChangeLedger = mergeStartLedger + levelHalf(level - 1);
+        if (levelShouldSpill(nextChangeLedger, level))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void
 BucketLevel::setSnap(std::shared_ptr<Bucket> b)
 {
@@ -84,8 +111,6 @@ BucketLevel::commit()
     if (mNextCurr.isLive())
     {
         setCurr(mNextCurr.resolve());
-        // CLOG(DEBUG, "Bucket") << "level " << mLevel << " set mCurr to "
-        //            << mCurr->getEntries().size() << " elements";
     }
     assert(!mNextCurr.isMerging());
 }
@@ -130,30 +155,13 @@ BucketLevel::prepare(Application& app, uint32_t currLedger,
                      std::vector<std::shared_ptr<Bucket>> const& shadows,
                      bool countMergeEvents)
 {
+    ZoneScoped;
     // If more than one absorb is pending at the same time, we have a logic
     // error in our caller (and all hell will break loose).
     assert(!mNextCurr.isMerging());
-
-    auto curr = mCurr;
-
-    // Subtle: We're "preparing the next state" of this level's mCurr, which is
-    // *either* mCurr merged with snap, or else just snap (if mCurr is going to
-    // be snapshotted itself in the next spill). This second condition happens
-    // when currLedger is one multiple of the previous levels's spill-size away
-    // from a snap of its own.  Eg. level 1 at ledger 6 (2 away from 8, its next
-    // snap), or level 2 at ledger 24 (8 away from 32, its next snap). See
-    // diagram above.
-    if (mLevel != 0)
-    {
-        uint32_t nextChangeLedger =
-            currLedger + BucketList::levelHalf(mLevel - 1);
-        if (BucketList::levelShouldSpill(nextChangeLedger, mLevel))
-        {
-            // CLOG(DEBUG, "Bucket") << "level " << mLevel
-            //            << " skipping pending-snapshot curr";
-            curr = std::make_shared<Bucket>();
-        }
-    }
+    auto curr = BucketList::shouldMergeWithEmptyCurr(currLedger, mLevel)
+                    ? std::make_shared<Bucket>()
+                    : mCurr;
 
     auto shadowsBasedOnProtocol =
         Bucket::getBucketVersion(snap) >= Bucket::FIRST_PROTOCOL_SHADOWS_REMOVED
@@ -169,10 +177,6 @@ BucketLevel::snap()
 {
     mSnap = mCurr;
     mCurr = std::make_shared<Bucket>();
-    // CLOG(DEBUG, "Bucket") << "level " << mLevel << " set mSnap to "
-    //            << mSnap->getEntries().size() << " elements";
-    // CLOG(DEBUG, "Bucket") << "level " << mLevel << " reset mCurr to "
-    //            << mCurr->getEntries().size() << " elements";
     return mSnap;
 }
 
@@ -356,12 +360,13 @@ BucketList::oldestLedgerInSnap(uint32_t ledger, uint32_t level)
 uint256
 BucketList::getHash() const
 {
-    auto hsh = SHA256::create();
+    ZoneScoped;
+    SHA256 hsh;
     for (auto const& lev : mLevels)
     {
-        hsh->add(lev.getHash());
+        hsh.add(lev.getHash());
     }
-    return hsh->finish();
+    return hsh.finish();
 }
 
 // levelShouldSpill is the set of boundaries at which each level should spill,
@@ -417,6 +422,7 @@ BucketList::getLevel(uint32_t i)
 void
 BucketList::resolveAnyReadyFutures()
 {
+    ZoneScoped;
     for (auto& level : mLevels)
     {
         if (level.getNext().isMerging() && level.getNext().mergeComplete())
@@ -429,6 +435,7 @@ BucketList::resolveAnyReadyFutures()
 bool
 BucketList::futuresAllResolved(uint32_t maxLevel) const
 {
+    ZoneScoped;
     assert(maxLevel < mLevels.size());
 
     for (uint32_t i = 0; i <= maxLevel; i++)
@@ -462,6 +469,7 @@ BucketList::addBatch(Application& app, uint32_t currLedger,
                      std::vector<LedgerEntry> const& liveEntries,
                      std::vector<LedgerKey> const& deadEntries)
 {
+    ZoneScoped;
     assert(currLedger > 0);
 
     std::vector<std::shared_ptr<Bucket>> shadows;
@@ -508,11 +516,10 @@ BucketList::addBatch(Application& app, uint32_t currLedger,
         shadows.pop_back();
 
         /*
-        CLOG(DEBUG, "Bucket") << "curr=" << currLedger
-                   << ", half(i-1)=" << levelHalf(i-1)
-                   << ", size(i-1)=" << levelSize(i-1)
-                   << ", mask(curr,half)=" << mask(currLedger, levelHalf(i-1))
-                   << ", mask(curr,size)=" << mask(currLedger, levelSize(i-1));
+        CLOG_DEBUG(Bucket, "curr={}, half(i-1)={}, size(i-1)={},
+        mask(curr,half)={}, mask(curr,size)={}", currLedger, levelHalf(i-1),
+        levelSize(i-1), mask(currLedger, levelHalf(i-1)), mask(currLedger,
+        levelSize(i-1)));
         */
         if (levelShouldSpill(currLedger, i - 1))
         {
@@ -542,14 +549,6 @@ BucketList::addBatch(Application& app, uint32_t currLedger,
              */
 
             auto snap = mLevels[i - 1].snap();
-
-            // CLOG(DEBUG, "Bucket") << "Ledger " << currLedger
-            //           << " causing commit on level " << i
-            //           << " and prepare of "
-            //           << snap->getEntries().size()
-            //           << " element snap from level " << i-1
-            //           << " to level " << i;
-
             mLevels[i].commit();
             mLevels[i].prepare(app, currLedger, currLedgerProtocol, snap,
                                shadows, /*countMergeEvents=*/true);
@@ -589,6 +588,7 @@ void
 BucketList::restartMerges(Application& app, uint32_t maxProtocolVersion,
                           uint32_t ledger)
 {
+    ZoneScoped;
     for (uint32_t i = 0; i < static_cast<uint32>(mLevels.size()); i++)
     {
         auto& level = mLevels[i];
@@ -598,8 +598,7 @@ BucketList::restartMerges(Application& app, uint32_t maxProtocolVersion,
             next.makeLive(app, maxProtocolVersion, i);
             if (next.isMerging())
             {
-                CLOG(INFO, "Bucket")
-                    << "Restarted merge on BucketList level " << i;
+                CLOG_INFO(Bucket, "Restarted merge on BucketList level {}", i);
             }
         }
         // The next block assumes we are re-starting a

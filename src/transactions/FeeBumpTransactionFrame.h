@@ -39,31 +39,36 @@ class FeeBumpTransactionFrame : public TransactionFrameBase
     ValidationType commonValid(SignatureChecker& signatureChecker,
                                AbstractLedgerTxn& ltxOuter, bool applying);
 
-    bool removeAccountSigner(LedgerTxnHeader const& header,
-                             LedgerTxnEntry& account,
-                             SignerKey const& signerKey) const;
-
     void removeOneTimeSignerKeyFromFeeSource(AbstractLedgerTxn& ltx) const;
 
-    void resetResults(LedgerHeader const& header, int64_t baseFee);
+  protected:
+    void resetResults(LedgerHeader const& header, int64_t baseFee,
+                      bool applying);
 
   public:
     FeeBumpTransactionFrame(Hash const& networkID,
                             TransactionEnvelope const& envelope);
+#ifdef BUILD_TESTS
+    FeeBumpTransactionFrame(Hash const& networkID,
+                            TransactionEnvelope const& envelope,
+                            TransactionFramePtr innerTx);
+#endif
 
     virtual ~FeeBumpTransactionFrame(){};
 
     bool apply(Application& app, AbstractLedgerTxn& ltx,
                TransactionMeta& meta) override;
 
-    bool checkValid(AbstractLedgerTxn& ltxOuter,
-                    SequenceNumber current) override;
+    bool checkValid(AbstractLedgerTxn& ltxOuter, SequenceNumber current,
+                    uint64_t lowerBoundCloseTimeOffset,
+                    uint64_t upperBoundCloseTimeOffset) override;
 
     TransactionEnvelope const& getEnvelope() const override;
 
     int64_t getFeeBid() const override;
     int64_t getMinFee(LedgerHeader const& header) const override;
-    int64_t getFee(LedgerHeader const& header, int64_t baseFee) const override;
+    int64_t getFee(LedgerHeader const& header, int64_t baseFee,
+                   bool applying) const override;
 
     Hash const& getContentsHash() const override;
     Hash const& getFullHash() const override;
@@ -78,13 +83,15 @@ class FeeBumpTransactionFrame : public TransactionFrameBase
     AccountID getFeeSourceID() const override;
     AccountID getSourceID() const override;
 
-    void insertKeysForFeeProcessing(
-        std::unordered_set<LedgerKey>& keys) const override;
     void
-    insertKeysForTxApply(std::unordered_set<LedgerKey>& keys) const override;
+    insertKeysForFeeProcessing(UnorderedSet<LedgerKey>& keys) const override;
+    void insertKeysForTxApply(UnorderedSet<LedgerKey>& keys) const override;
 
     void processFeeSeqNum(AbstractLedgerTxn& ltx, int64_t baseFee) override;
 
     StellarMessage toStellarMessage() const override;
+
+    static TransactionEnvelope
+    convertInnerTxToV1(TransactionEnvelope const& envelope);
 };
 }

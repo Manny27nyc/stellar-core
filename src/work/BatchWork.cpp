@@ -5,7 +5,8 @@
 #include "work/BatchWork.h"
 #include "catchup/CatchupManager.h"
 #include "util/Logging.h"
-#include "util/format.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -25,6 +26,7 @@ BatchWork::doReset()
 BasicWork::State
 BatchWork::doWork()
 {
+    ZoneScoped;
     if (anyChildRaiseFailure())
     {
         return State::WORK_FAILURE;
@@ -35,7 +37,7 @@ BatchWork::doWork()
     {
         if (childIt->second->getState() == State::WORK_SUCCESS)
         {
-            CLOG(DEBUG, "Work") << "Finished child work " << childIt->first;
+            CLOG_DEBUG(Work, "Finished child work {}", childIt->first);
             childIt = mBatch.erase(childIt);
         }
         else
@@ -62,6 +64,7 @@ BatchWork::doWork()
 void
 BatchWork::addMoreWorkIfNeeded()
 {
+    ZoneScoped;
     if (isAborting())
     {
         throw std::runtime_error(getName() + " is being aborted!");

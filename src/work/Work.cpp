@@ -3,8 +3,9 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "work/Work.h"
-#include "lib/util/format.h"
 #include "util/Logging.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 namespace stellar
 {
@@ -35,6 +36,7 @@ Work::getStatus() const
 void
 Work::shutdown()
 {
+    ZoneScoped;
     shutdownChildren();
     BasicWork::shutdown();
 }
@@ -42,6 +44,7 @@ Work::shutdown()
 BasicWork::State
 Work::onRun()
 {
+    ZoneScoped;
     if (mAbortChildrenButNotSelf)
     {
         // Stop whatever work was doing, just wait for children to abort
@@ -57,7 +60,7 @@ Work::onRun()
 
     else
     {
-        CLOG(DEBUG, "Work") << "Running " << getName();
+        CLOG_DEBUG(Work, "Running {}", getName());
         auto state = doWork();
         if (state == State::WORK_SUCCESS)
         {
@@ -66,9 +69,10 @@ Work::onRun()
         }
         else if (state == State::WORK_FAILURE && !allChildrenDone())
         {
-            CLOG(DEBUG, "Work")
-                << "A child of " << getName()
-                << " failed: aborting remaining children before failure.";
+            CLOG_DEBUG(Work,
+                       "A child of {} failed: aborting remaining children "
+                       "before failure.",
+                       getName());
             shutdownChildren();
             mAbortChildrenButNotSelf = true;
             return State::WORK_RUNNING;
@@ -80,6 +84,7 @@ Work::onRun()
 bool
 Work::onAbort()
 {
+    ZoneScoped;
     auto child = yieldNextRunningChild();
     if (child)
     {
@@ -89,7 +94,7 @@ Work::onAbort()
     }
     else
     {
-        CLOG(TRACE, "Work") << getName() << ": waiting for children to abort.";
+        CLOG_TRACE(Work, "{}: waiting for children to abort.", getName());
         return allChildrenDone();
     }
 }
@@ -120,6 +125,7 @@ Work::shutdownChildren()
 void
 Work::onReset()
 {
+    ZoneScoped;
     clearChildren();
     mAbortChildrenButNotSelf = false;
     doReset();
@@ -133,6 +139,7 @@ Work::doReset()
 void
 Work::clearChildren()
 {
+    ZoneScoped;
     assert(allChildrenDone());
     mDoneChildren += mChildren.size();
     mChildren.clear();

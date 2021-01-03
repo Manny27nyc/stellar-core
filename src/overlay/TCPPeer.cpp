@@ -3,21 +3,23 @@
 // of this distribution or at http://www.apache.org/licenses/LICENSE-2.0
 
 #include "overlay/TCPPeer.h"
+#include "crypto/CryptoError.h"
+#include "crypto/Curve25519.h"
 #include "database/Database.h"
 #include "main/Application.h"
 #include "main/Config.h"
 #include "main/ErrorMessages.h"
 #include "medida/meter.h"
 #include "medida/metrics_registry.h"
-#include "overlay/LoadManager.h"
 #include "overlay/OverlayManager.h"
 #include "overlay/OverlayMetrics.h"
 #include "overlay/PeerManager.h"
 #include "overlay/StellarXDR.h"
 #include "util/GlobalChecks.h"
 #include "util/Logging.h"
-#include "util/format.h"
 #include "xdrpp/marshal.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 
 using namespace soci;
 
@@ -43,8 +45,7 @@ TCPPeer::initiate(Application& app, PeerBareAddress const& address)
 {
     assert(address.getType() == PeerBareAddress::Type::IPv4);
 
-    CLOG(DEBUG, "Overlay") << "TCPPeer:initiate"
-                           << " to " << address.toString();
+    CLOG_DEBUG(Overlay, "TCPPeer:initiate to {}", address.toString());
     assertThreadIsMain();
     auto socket = make_shared<SocketType>(app.getClock().getIOContext(), BUFSZ);
     auto result = make_shared<TCPPeer>(app, WE_CALLED_REMOTE, socket);
@@ -82,17 +83,15 @@ TCPPeer::accept(Application& app, shared_ptr<TCPPeer::SocketType> socket)
 
     if (!ec)
     {
-        CLOG(DEBUG, "Overlay") << "TCPPeer:accept"
-                               << "@" << app.getConfig().PEER_PORT;
+        CLOG_DEBUG(Overlay, "TCPPeer:accept@{}", app.getConfig().PEER_PORT);
         result = make_shared<TCPPeer>(app, REMOTE_CALLED_US, socket);
         result->startRecurrentTimer();
         result->startRead();
     }
     else
     {
-        CLOG(DEBUG, "Overlay")
-            << "TCPPeer:accept"
-            << "@" << app.getConfig().PEER_PORT << " error " << ec.message();
+        CLOG_DEBUG(Overlay, "TCPPeer:accept@{} error {}",
+                   app.getConfig().PEER_PORT, ec.message());
     }
 
     return result;
@@ -124,7 +123,12 @@ TCPPeer::getIP() const
 
     asio::error_code ec;
     auto ep = mSocket->next_layer().remote_endpoint(ec);
-    if (!ec)
+    if (ec)
+    {
+        CLOG_ERROR(Overlay, "Could not determine remote endpoint: {}",
+                   ec.message());
+    }
+    else
     {
         result = ep.address().to_string();
     }
@@ -137,9 +141,9 @@ TCPPeer::sendMessage(xdr::msg_ptr&& xdrBytes)
 {
     if (mState == CLOSING)
     {
-        CLOG(ERROR, "Overlay")
-            << "Trying to send message to " << toString() << " after drop";
-        CLOG(ERROR, "Overlay") << REPORT_INTERNAL_BUG;
+        CLOG_ERROR(Overlay, "Trying to send message to {} after drop",
+                   toString());
+        CLOG_ERROR(Overlay, "{}", REPORT_INTERNAL_BUG);
         return;
     }
 
@@ -163,8 +167,8 @@ TCPPeer::shutdown()
     if (mShutdownScheduled)
     {
         // should not happen, leave here for debugging purposes
-        CLOG(ERROR, "Overlay") << "Double schedule of shutdown " << toString();
-        CLOG(ERROR, "Overlay") << REPORT_INTERNAL_BUG;
+        CLOG_ERROR(Overlay, "Double schedule of shutdown {}", toString());
+        CLOG_ERROR(Overlay, "{}", REPORT_INTERNAL_BUG);
         return;
     }
 
@@ -195,8 +199,8 @@ TCPPeer::shutdown()
             asio::ip::tcp::socket::shutdown_both, ec);
         if (ec)
         {
-            CLOG(DEBUG, "Overlay")
-                << "TCPPeer::drop shutdown socket failed: " << ec.message();
+            CLOG_DEBUG(Overlay, "TCPPeer::drop shutdown socket failed: {}",
+                       ec.message());
         }
         self->getApp().postOnMainThread(
             [self]() {
@@ -213,19 +217,18 @@ TCPPeer::shutdown()
                 self->mSocket->close(ec2);
                 if (ec2)
                 {
-                    CLOG(DEBUG, "Overlay")
-                        << "TCPPeer::drop close socket failed: "
-                        << ec2.message();
+                    CLOG_DEBUG(Overlay, "TCPPeer::drop close socket failed: {}",
+                               ec2.message());
                 }
             },
-            {VirtualClock::ExecutionCategory::Type::NORMAL_EVENT,
-             "TCPPeer: close"});
+            "TCPPeer: close");
     });
 }
 
 void
 TCPPeer::messageSender()
 {
+    ZoneScoped;
     assertThreadIsMain();
 
     // if nothing to do, mark progress and return.
@@ -270,9 +273,8 @@ TCPPeer::messageSender()
 
     if (Logging::logDebug("Overlay"))
     {
-        CLOG(DEBUG, "Overlay") << fmt::format(
-            "messageSender {} - b:{} n:{}/{}", toString(), expected_length,
-            mWriteBuffers.size(), mWriteQueue.size());
+        CLOG_DEBUG(Overlay, "messageSender {} - b:{} n:{}/{}", toString(),
+                   expected_length, mWriteBuffers.size(), mWriteQueue.size());
     }
     getOverlayMetrics().mAsyncWrite.Mark();
     auto self = static_pointer_cast<TCPPeer>(shared_from_this());
@@ -333,6 +335,7 @@ TCPPeer::writeHandler(asio::error_code const& error,
                       std::size_t bytes_transferred,
                       size_t messages_transferred)
 {
+    ZoneScoped;
     assertThreadIsMain();
     mLastWrite = mApp.getClock().now();
 
@@ -343,8 +346,8 @@ TCPPeer::writeHandler(asio::error_code const& error,
             // Only emit a warning if we have an error while connected;
             // errors during shutdown or connection are common/expected.
             getOverlayMetrics().mErrorWrite.Mark();
-            CLOG(ERROR, "Overlay")
-                << "Error during sending message to " << toString();
+            CLOG_ERROR(Overlay, "Error during sending message to {}",
+                       toString());
         }
         if (mDelayedShutdown)
         {
@@ -360,7 +363,6 @@ TCPPeer::writeHandler(asio::error_code const& error,
     }
     else if (bytes_transferred != 0)
     {
-        LoadManager::PeerContext loadCtx(mApp, mPeerID);
         getOverlayMetrics().mMessageWrite.Mark(messages_transferred);
         getOverlayMetrics().mByteWrite.Mark(bytes_transferred);
 
@@ -422,8 +424,26 @@ TCPPeer::noteFullyReadBody(size_t nbytes)
 }
 
 void
+TCPPeer::scheduleRead()
+{
+    // Post to the peer-specific Scheduler a call to ::startRead below;
+    // this will be throttled to try to balance input rates across peers.
+    ZoneScoped;
+    assertThreadIsMain();
+    if (shouldAbort())
+    {
+        return;
+    }
+    auto self = static_pointer_cast<TCPPeer>(shared_from_this());
+    self->getApp().postOnMainThread(
+        [self]() { self->startRead(); },
+        fmt::format("TCPPeer::startRead for {}", toString()));
+}
+
+void
 TCPPeer::startRead()
 {
+    ZoneScoped;
     assertThreadIsMain();
     if (shouldAbort())
     {
@@ -432,17 +452,18 @@ TCPPeer::startRead()
 
     mIncomingHeader.clear();
 
-    CLOG(DEBUG, "Overlay") << "TCPPeer::startRead " << mSocket->in_avail()
-                           << " from " << toString();
+    if (Logging::logDebug("Overlay"))
+    {
+        CLOG_DEBUG(Overlay, "TCPPeer::startRead {} from {}",
+                   mSocket->in_avail(), toString());
+    }
 
     mIncomingHeader.resize(HDRSZ);
 
     // We read large-ish (256KB) buffers of data from TCP which might have quite
     // a few messages in them. We want to digest as many of these
     // _synchronously_ as we can before we issue an async_read against ASIO.
-    YieldTimer yt(mApp.getClock(), mApp.getConfig().MAX_BATCH_READ_PERIOD_MS,
-                  mApp.getConfig().MAX_BATCH_READ_COUNT);
-    while (mSocket->in_avail() >= HDRSZ && yt.shouldKeepGoing())
+    while (mSocket->in_avail() >= HDRSZ)
     {
         asio::error_code ec_hdr, ec_body;
         size_t n = mSocket->read_some(asio::buffer(mIncomingHeader), ec_hdr);
@@ -478,6 +499,10 @@ TCPPeer::startRead()
                 }
                 noteFullyReadBody(length);
                 recvMessage();
+                if (mApp.getClock().shouldYield())
+                {
+                    break;
+                }
             }
         }
         else
@@ -506,13 +531,10 @@ TCPPeer::startRead()
     }
     else
     {
-        // we have enough data but need to bounce on the main thread as we've
-        // done too much work already
-        auto self = static_pointer_cast<TCPPeer>(shared_from_this());
-        self->getApp().postOnMainThread(
-            [self]() { self->startRead(); },
-            {VirtualClock::ExecutionCategory::Type::NORMAL_EVENT,
-             fmt::format("{} TCPPeer: startRead", toString())});
+        // If we get here it's because we broke out of the input loop above
+        // early (via shouldYield) which means it's time to bounce off a the
+        // per-peer scheduler queue to throttle further input.
+        scheduleRead();
     }
 }
 
@@ -532,9 +554,8 @@ TCPPeer::getIncomingMsgLength()
         length > MAX_MESSAGE_SIZE)
     {
         getOverlayMetrics().mErrorRead.Mark();
-        CLOG(ERROR, "Overlay")
-            << "TCP: message size unacceptable: " << length
-            << (isAuthenticated() ? "" : " while not authenticated");
+        CLOG_ERROR(Overlay, "TCP: message size unacceptable: {}{}", length,
+                   (isAuthenticated() ? "" : " while not authenticated"));
         drop("error during read", Peer::DropDirection::WE_DROPPED_REMOTE,
              Peer::DropMode::IGNORE_WRITE_QUEUE);
         length = 0;
@@ -546,6 +567,14 @@ void
 TCPPeer::connected()
 {
     startRead();
+}
+
+bool
+TCPPeer::sendQueueIsOverloaded() const
+{
+    auto now = mApp.getClock().now();
+    return (!mWriteQueue.empty() && (now - mWriteQueue.front().mEnqueuedTime) >
+                                        SCHEDULER_LATENCY_WINDOW);
 }
 
 void
@@ -599,13 +628,18 @@ TCPPeer::readBodyHandler(asio::error_code const& error,
         noteFullyReadBody(bytes_transferred);
         recvMessage();
         mIncomingHeader.clear();
-        startRead();
+        // Completing a startRead => readHeaderHandler => readBodyHandler
+        // sequence happens after the first read of a single large input-buffer
+        // worth of input. Even when we weren't preempted, we still bounce off
+        // the per-peer scheduler queue here, to balance input across peers.
+        scheduleRead();
     }
 }
 
 void
 TCPPeer::recvMessage()
 {
+    ZoneScoped;
     assertThreadIsMain();
 
     try
@@ -619,8 +653,14 @@ TCPPeer::recvMessage()
     }
     catch (xdr::xdr_runtime_error& e)
     {
-        CLOG(ERROR, "Overlay") << "recvMessage got a corrupt xdr: " << e.what();
+        CLOG_ERROR(Overlay, "recvMessage got a corrupt xdr: {}", e.what());
         sendErrorAndDrop(ERR_DATA, "received corrupt XDR",
+                         Peer::DropMode::IGNORE_WRITE_QUEUE);
+    }
+    catch (CryptoError const& e)
+    {
+        CLOG_ERROR(Overlay, "Crypto error: {}", e.what());
+        sendErrorAndDrop(ERR_DATA, "crypto error",
                          Peer::DropMode::IGNORE_WRITE_QUEUE);
     }
 }
@@ -637,18 +677,16 @@ TCPPeer::drop(std::string const& reason, DropDirection dropDirection,
 
     if (mState != GOT_AUTH)
     {
-        CLOG(DEBUG, "Overlay") << "TCPPeer::drop " << toString() << " in state "
-                               << mState << " we called:" << mRole;
+        CLOG_DEBUG(Overlay, "TCPPeer::drop {} in state {} we called:{}",
+                   toString(), mState, mRole);
     }
     else if (dropDirection == Peer::DropDirection::WE_DROPPED_REMOTE)
     {
-        CLOG(INFO, "Overlay")
-            << "Dropping peer " << toString() << "; reason: " << reason;
+        CLOG_INFO(Overlay, "Dropping peer {}, reason {}", toString(), reason);
     }
     else
     {
-        CLOG(INFO, "Overlay")
-            << "Peer " << toString() << " dropped us; reason: " << reason;
+        CLOG_INFO(Overlay, "Peer {} dropped us, reason {}", toString(), reason);
     }
 
     mState = CLOSING;

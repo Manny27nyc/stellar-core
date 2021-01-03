@@ -17,13 +17,13 @@
 #include "transactions/TransactionUtils.h"
 #include "util/GlobalChecks.h"
 #include "util/Logging.h"
+#include "util/XDRCereal.h"
 #include "util/XDROperators.h"
 #include "xdrpp/marshal.h"
+#include <Tracy.hpp>
 #include <algorithm>
 #include <list>
 #include <numeric>
-
-#include "xdrpp/printer.h"
 
 namespace stellar
 {
@@ -31,13 +31,14 @@ namespace stellar
 using namespace std;
 
 TxSetFrame::TxSetFrame(Hash const& previousLedgerHash)
-    : mHashIsValid(false), mPreviousLedgerHash(previousLedgerHash)
+    : mHash(nullptr), mValid(nullptr), mPreviousLedgerHash(previousLedgerHash)
 {
 }
 
 TxSetFrame::TxSetFrame(Hash const& networkID, TransactionSet const& xdrSet)
-    : mHashIsValid(false)
+    : mHash(nullptr), mValid(nullptr)
 {
+    ZoneScoped;
     for (auto const& env : xdrSet.txs)
     {
         auto tx = TransactionFrameBase::makeTransactionFromWire(networkID, env);
@@ -60,8 +61,10 @@ HashTxSorter(TransactionFrameBasePtr const& tx1,
 void
 TxSetFrame::sortForHash()
 {
+    ZoneScoped;
     std::sort(mTransactions.begin(), mTransactions.end(), HashTxSorter);
-    mHashIsValid = false;
+    mHash.reset();
+    mValid.reset();
 }
 
 // We want to XOR the tx hash with the set hash.
@@ -101,6 +104,7 @@ SeqSorter(TransactionFrameBasePtr const& tx1,
 std::vector<TransactionFrameBasePtr>
 TxSetFrame::sortForApply()
 {
+    ZoneScoped;
     auto txQueues = buildAccountTxQueues();
 
     // build txBatches
@@ -174,6 +178,18 @@ struct SurgeCompare
         // compare fee/numOps between top1 and top2
         // getNumOperations >= 1 because SurgeCompare can only be used on
         // valid transactions
+        //
+        // Let f1, f2 be the two fee bids, and let n1, n2 be the two
+        // operation counts. We want to calculate the boolean comparison
+        // "f1 / n1 < f2 / n2" but, since these are uint128s, we want to
+        // avoid the truncating division or use of floating point.
+        //
+        // Therefore we multiply both sides by n1 * n2, and cancel:
+        //
+        //               f1 / n1 < f2 / n2
+        //  == f1 * n1 * n2 / n1 < f2 * n1 * n2 / n2
+        //  == f1 *      n2      < f2 * n1
+
         auto v1 = bigMultiply(top1->getFeeBid(), top2->getNumOperations());
         auto v2 = bigMultiply(top2->getFeeBid(), top1->getNumOperations());
         if (v1 < v2)
@@ -189,10 +205,11 @@ struct SurgeCompare
     }
 };
 
-std::unordered_map<AccountID, TxSetFrame::AccountTransactionQueue>
+UnorderedMap<AccountID, TxSetFrame::AccountTransactionQueue>
 TxSetFrame::buildAccountTxQueues()
 {
-    std::unordered_map<AccountID, AccountTransactionQueue> actTxQueueMap;
+    ZoneScoped;
+    UnorderedMap<AccountID, AccountTransactionQueue> actTxQueueMap;
     for (auto& tx : mTransactions)
     {
         auto id = tx->getSourceID();
@@ -217,6 +234,7 @@ TxSetFrame::buildAccountTxQueues()
 void
 TxSetFrame::surgePricingFilter(Application& app)
 {
+    ZoneScoped;
     LedgerTxn ltx(app.getLedgerTxnRoot());
     auto header = ltx.loadHeader();
 
@@ -227,8 +245,8 @@ TxSetFrame::surgePricingFilter(Application& app)
     auto curSizeOps = maxIsOps ? sizeOp() : (sizeTx() * MAX_OPS_PER_TX);
     if (curSizeOps > opsLeft)
     {
-        CLOG(WARNING, "Herder")
-            << "surge pricing in effect! " << curSizeOps << " > " << opsLeft;
+        CLOG_WARNING(Herder, "surge pricing in effect! {} > {}", curSizeOps,
+                     opsLeft);
 
         auto actTxQueueMap = buildAccountTxQueues();
 
@@ -277,11 +295,13 @@ TxSetFrame::surgePricingFilter(Application& app)
 bool
 TxSetFrame::checkOrTrim(Application& app,
                         std::vector<TransactionFrameBasePtr>& trimmed,
-                        bool justCheck)
+                        bool justCheck, uint64_t lowerBoundCloseTimeOffset,
+                        uint64_t upperBoundCloseTimeOffset)
 {
+    ZoneScoped;
     LedgerTxn ltx(app.getLedgerTxnRoot());
 
-    std::unordered_map<AccountID, int64_t> accountFeeMap;
+    UnorderedMap<AccountID, int64_t> accountFeeMap;
     auto accountTxMap = buildAccountTxQueues();
     for (auto& kv : accountTxMap)
     {
@@ -290,15 +310,17 @@ TxSetFrame::checkOrTrim(Application& app,
         while (iter != kv.second.end())
         {
             auto tx = *iter;
-            if (!tx->checkValid(ltx, lastSeq))
+            if (!tx->checkValid(ltx, lastSeq, lowerBoundCloseTimeOffset,
+                                upperBoundCloseTimeOffset))
             {
                 if (justCheck)
                 {
-                    CLOG(DEBUG, "Herder")
-                        << "Got bad txSet: " << hexAbbrev(mPreviousLedgerHash)
-                        << " tx invalid lastSeq:" << lastSeq
-                        << " tx: " << xdr::xdr_to_string(tx->getEnvelope())
-                        << " result: " << tx->getResultCode();
+                    CLOG_DEBUG(Herder,
+                               "Got bad txSet: {} tx invalid lastSeq:{} tx: {} "
+                               "result: {}",
+                               hexAbbrev(mPreviousLedgerHash), lastSeq,
+                               xdr_to_string(tx->getEnvelope()),
+                               tx->getResultCode());
                     return false;
                 }
                 trimmed.emplace_back(tx);
@@ -335,10 +357,10 @@ TxSetFrame::checkOrTrim(Application& app,
             {
                 if (justCheck)
                 {
-                    CLOG(DEBUG, "Herder")
-                        << "Got bad txSet: " << hexAbbrev(mPreviousLedgerHash)
-                        << " account can't pay fee tx: "
-                        << xdr::xdr_to_string(tx->getEnvelope());
+                    CLOG_DEBUG(Herder,
+                               "Got bad txSet: {} account can't pay fee tx: {}",
+                               hexAbbrev(mPreviousLedgerHash),
+                               xdr_to_string(tx->getEnvelope()));
                     return false;
                 }
                 while (iter != kv.second.end())
@@ -359,11 +381,14 @@ TxSetFrame::checkOrTrim(Application& app,
 }
 
 std::vector<TransactionFrameBasePtr>
-TxSetFrame::trimInvalid(Application& app)
+TxSetFrame::trimInvalid(Application& app, uint64_t lowerBoundCloseTimeOffset,
+                        uint64_t upperBoundCloseTimeOffset)
 {
+    ZoneScoped;
     std::vector<TransactionFrameBasePtr> trimmed;
     sortForHash();
-    checkOrTrim(app, trimmed, false);
+    checkOrTrim(app, trimmed, false, lowerBoundCloseTimeOffset,
+                upperBoundCloseTimeOffset);
     return trimmed;
 }
 
@@ -371,23 +396,29 @@ TxSetFrame::trimInvalid(Application& app)
 // the fees of all the tx it has submitted in this set
 // check seq num
 bool
-TxSetFrame::checkValid(Application& app)
+TxSetFrame::checkValid(Application& app, uint64_t lowerBoundCloseTimeOffset,
+                       uint64_t upperBoundCloseTimeOffset)
 {
+    ZoneScoped;
     auto& lcl = app.getLedgerManager().getLastClosedLedgerHeader();
+    if (mValid && mValid->first == lcl.hash)
+    {
+        return mValid->second;
+    }
     // Start by checking previousLedgerHash
     if (lcl.hash != mPreviousLedgerHash)
     {
-        CLOG(DEBUG, "Herder")
-            << "Got bad txSet: " << hexAbbrev(mPreviousLedgerHash)
-            << " ; expected: " << hexAbbrev(lcl.hash);
+        CLOG_DEBUG(Herder, "Got bad txSet: {}, expected {}",
+                   hexAbbrev(mPreviousLedgerHash), hexAbbrev(lcl.hash));
+        mValid = make_optional<std::pair<Hash, bool>>(lcl.hash, false);
         return false;
     }
 
     if (this->size(lcl.header) > lcl.header.maxTxSetSize)
     {
-        CLOG(DEBUG, "Herder")
-            << "Got bad txSet: too many txs " << this->size(lcl.header) << " > "
-            << lcl.header.maxTxSetSize;
+        CLOG_DEBUG(Herder, "Got bad txSet: too many txs {} > {}",
+                   this->size(lcl.header), lcl.header.maxTxSetSize);
+        mValid = make_optional<std::pair<Hash, bool>>(lcl.hash, false);
         return false;
     }
 
@@ -396,14 +427,17 @@ TxSetFrame::checkValid(Application& app)
                             return lhs->getFullHash() < rhs->getFullHash();
                         }))
     {
-        CLOG(DEBUG, "Herder")
-            << "Got bad txSet: " << hexAbbrev(mPreviousLedgerHash)
-            << " not sorted correctly";
+        CLOG_DEBUG(Herder, "Got bad txSet: {} not sorted correctly",
+                   hexAbbrev(mPreviousLedgerHash));
+        mValid = make_optional<std::pair<Hash, bool>>(lcl.hash, false);
         return false;
     }
 
     std::vector<TransactionFrameBasePtr> trimmed;
-    return checkOrTrim(app, trimmed, true);
+    bool valid = checkOrTrim(app, trimmed, true, lowerBoundCloseTimeOffset,
+                             upperBoundCloseTimeOffset);
+    mValid = make_optional<std::pair<Hash, bool>>(lcl.hash, valid);
+    return valid;
 }
 
 void
@@ -412,31 +446,35 @@ TxSetFrame::removeTx(TransactionFrameBasePtr tx)
     auto it = std::find(mTransactions.begin(), mTransactions.end(), tx);
     if (it != mTransactions.end())
         mTransactions.erase(it);
-    mHashIsValid = false;
+    mHash.reset();
+    mValid.reset();
 }
 
 Hash const&
 TxSetFrame::getContentsHash()
 {
-    if (!mHashIsValid)
+    ZoneScoped;
+    if (!mHash)
     {
         sortForHash();
-        auto hasher = SHA256::create();
-        hasher->add(mPreviousLedgerHash);
+        SHA256 hasher;
+        hasher.add(mPreviousLedgerHash);
         for (unsigned int n = 0; n < mTransactions.size(); n++)
         {
-            hasher->add(xdr::xdr_to_opaque(mTransactions[n]->getEnvelope()));
+            hasher.add(xdr::xdr_to_opaque(mTransactions[n]->getEnvelope()));
         }
-        mHash = hasher->finish();
-        mHashIsValid = true;
+        mHash = make_optional<Hash>(hasher.finish());
     }
-    return mHash;
+    return *mHash;
 }
 
 Hash&
 TxSetFrame::previousLedgerHash()
 {
-    mHashIsValid = false;
+    // Handing out a mutable reference means the caller might
+    // be mutating, so we treat this as an invalidation event.
+    mHash.reset();
+    mValid.reset();
     return mPreviousLedgerHash;
 }
 
@@ -455,6 +493,7 @@ TxSetFrame::size(LedgerHeader const& lh) const
 size_t
 TxSetFrame::sizeOp() const
 {
+    ZoneScoped;
     return std::accumulate(mTransactions.begin(), mTransactions.end(),
                            size_t(0),
                            [](size_t a, TransactionFrameBasePtr const& tx) {
@@ -497,17 +536,19 @@ TxSetFrame::getBaseFee(LedgerHeader const& lh) const
 int64_t
 TxSetFrame::getTotalFees(LedgerHeader const& lh) const
 {
+    ZoneScoped;
     auto baseFee = getBaseFee(lh);
     return std::accumulate(mTransactions.begin(), mTransactions.end(),
                            int64_t(0),
                            [&](int64_t t, TransactionFrameBasePtr const& tx) {
-                               return t + tx->getFee(lh, baseFee);
+                               return t + tx->getFee(lh, baseFee, true);
                            });
 }
 
 void
 TxSetFrame::toXDR(TransactionSet& txSet)
 {
+    ZoneScoped;
     releaseAssert(std::is_sorted(mTransactions.begin(), mTransactions.end(),
                                  HashTxSorter));
     txSet.txs.resize(xdr::size32(mTransactions.size()));

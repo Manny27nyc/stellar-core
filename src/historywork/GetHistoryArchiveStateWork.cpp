@@ -6,10 +6,11 @@
 #include "history/HistoryArchive.h"
 #include "historywork/GetRemoteFileWork.h"
 #include "ledger/LedgerManager.h"
-#include "lib/util/format.h"
 #include "main/Application.h"
 #include "main/ErrorMessages.h"
 #include "util/Logging.h"
+#include <Tracy.hpp>
+#include <fmt/format.h>
 #include <medida/meter.h>
 #include <medida/metrics_registry.h>
 
@@ -33,12 +34,20 @@ GetHistoryArchiveStateWork::GetHistoryArchiveStateWork(
 {
 }
 
+static bool
+isWellKnown(uint32_t seq)
+{
+    return seq == 0;
+}
+
 BasicWork::State
 GetHistoryArchiveStateWork::doWork()
 {
+    ZoneScoped;
     if (mGetRemoteFile)
     {
         auto state = mGetRemoteFile->getState();
+        auto archive = mGetRemoteFile->getCurrentArchive();
         if (state == State::WORK_SUCCESS)
         {
             try
@@ -47,14 +56,31 @@ GetHistoryArchiveStateWork::doWork()
             }
             catch (std::runtime_error& e)
             {
-                CLOG(ERROR, "History")
-                    << "Error loading history state: " << e.what();
-                CLOG(ERROR, "History") << POSSIBLY_CORRUPTED_LOCAL_FS;
-                CLOG(ERROR, "History") << "OR";
-                CLOG(ERROR, "History") << POSSIBLY_CORRUPTED_HISTORY;
-                CLOG(ERROR, "History") << "OR";
-                CLOG(ERROR, "History") << UPGRADE_STELLAR_CORE;
+                CLOG_ERROR(History, "Error loading history state: {}",
+                           e.what());
+                CLOG_ERROR(History, "{}", POSSIBLY_CORRUPTED_LOCAL_FS);
+                CLOG_ERROR(History, "OR");
+                CLOG_ERROR(History, "{}", POSSIBLY_CORRUPTED_HISTORY);
+                CLOG_ERROR(History, "OR");
+                CLOG_ERROR(History, "{}", UPGRADE_STELLAR_CORE);
                 return State::WORK_FAILURE;
+            }
+        }
+        else if (state == State::WORK_FAILURE && archive)
+        {
+            if (isWellKnown(mSeq))
+            {
+                // Archive is corrupt if it's missing a well-known file
+                CLOG_ERROR(History,
+                           "Could not download {} file: corrupt archive {}",
+                           HistoryArchiveState::wellKnownRemoteName(),
+                           archive->getName());
+            }
+            else
+            {
+                CLOG_ERROR(History,
+                           "Missing HAS for ledger {}: maybe stale archive {}",
+                           std::to_string(mSeq), archive->getName());
             }
         }
         return state;
@@ -63,7 +89,7 @@ GetHistoryArchiveStateWork::doWork()
     else
     {
         auto name = getRemoteName();
-        CLOG(INFO, "History") << "Downloading history archive state: " << name;
+        CLOG_INFO(History, "Downloading history archive state: {}", name);
         mGetRemoteFile = addWork<GetRemoteFileWork>(name, mLocalFilename,
                                                     mArchive, mRetries);
         return State::WORK_RUNNING;
@@ -88,8 +114,8 @@ GetHistoryArchiveStateWork::onSuccess()
 std::string
 GetHistoryArchiveStateWork::getRemoteName() const
 {
-    return mSeq == 0 ? HistoryArchiveState::wellKnownRemoteName()
-                     : HistoryArchiveState::remoteName(mSeq);
+    return isWellKnown(mSeq) ? HistoryArchiveState::wellKnownRemoteName()
+                             : HistoryArchiveState::remoteName(mSeq);
 }
 
 std::string
